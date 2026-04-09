@@ -72,11 +72,15 @@ Returns processing counts. Requires `upload_files` capability.
 
 | Filter | Default | Description |
 |--------|---------|-------------|
-| `ai_media_search_batch_size` | `5` | Images per hourly cron batch (clamped 1–50). |
+| `ai_media_search_batch_size` | `5` | Images per cron batch (clamped 1–50). |
 | `ai_media_search_prompt` | *(built-in)* | AI prompt text. Receives `$prompt, $attachment_id`. |
 | `ai_media_search_should_process` | `true` | Skip specific attachments. Receives `$should, $attachment_id`. |
 | `ai_media_search_max_retries` | `3` | Max retry attempts before marking as skipped. |
 | `ai_media_search_update_alt_text` | `false` | When true, writes AI description to empty alt text fields. |
+| `ai_media_search_metadata` | *(AI output)* | Filter metadata after AI generation, before storage. Receives `$metadata, $attachment_id`. |
+| `ai_media_search_search_text` | *(description + tags)* | Filter concatenated search text before storage. Receives `$search_text, $metadata, $attachment_id`. |
+| `ai_media_search_supported_mime_types` | `['image']` | MIME type prefixes to process. Add `'video'` or `'audio'` to extend. |
+| `ai_media_search_cron_interval` | `'hourly'` | Cron recurrence schedule name for batch processing. |
 
 ### Examples
 
@@ -96,13 +100,35 @@ add_filter( 'ai_media_search_should_process', function ( $should, $attachment_id
     }
     return $should;
 }, 10, 2 );
+
+// Append EXIF keywords to search text.
+add_filter( 'ai_media_search_search_text', function ( $text, $metadata, $attachment_id ) {
+    $meta = wp_get_attachment_metadata( $attachment_id );
+    if ( ! empty( $meta['image_meta']['keywords'] ) ) {
+        $text .= ' ' . implode( ' ', $meta['image_meta']['keywords'] );
+    }
+    return $text;
+}, 10, 3 );
+
+// Enable video processing (requires AI provider with video support).
+add_filter( 'ai_media_search_supported_mime_types', function ( $types ) {
+    $types[] = 'video';
+    return $types;
+} );
+
+// Run batch processing every 30 minutes instead of hourly.
+add_filter( 'ai_media_search_cron_interval', function () {
+    return 'every_thirty_minutes'; // Must be registered with wp_get_schedules().
+} );
 ```
 
 ## Actions
 
 | Action | Parameters | Description |
 |--------|-----------|-------------|
-| `ai_media_search_processed` | `$attachment_id, $metadata` | Fires after an image is successfully processed. |
+| `ai_media_search_processed` | `$attachment_id, $metadata` | Fires after an attachment is successfully processed. |
+| `ai_media_search_failed` | `$attachment_id, $error, $error_data` | Fires when processing fails. `$error_data` includes attempt count. |
+| `ai_media_search_batch_complete` | `$processed` | Fires after a batch cron run with the count of items processed. |
 
 ## Uninstall
 
