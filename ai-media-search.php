@@ -21,6 +21,10 @@ require_once __DIR__ . '/includes/processing.php';
 require_once __DIR__ . '/includes/hooks.php';
 require_once __DIR__ . '/includes/search.php';
 
+if ( defined( 'WP_CLI' ) && WP_CLI ) {
+	require_once __DIR__ . '/includes/cli.php';
+}
+
 /**
  * Bootstrap the plugin. All hooks are registered here, gated on AI support.
  */
