@@ -9,6 +9,7 @@
  * Author:      Adam Silverstein
  * License:     GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
+ * Text Domain: ai-media-search
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
