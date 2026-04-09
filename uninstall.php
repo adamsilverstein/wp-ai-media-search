@@ -12,4 +12,10 @@ if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
 global $wpdb;
 
 // phpcs:ignore WordPress.DB.DirectDatabaseQuery
-$wpdb->query( "DELETE FROM {$wpdb->postmeta} WHERE meta_key LIKE '_wp_ai_media_search_%'" );
+$like = $wpdb->esc_like( '_wp_ai_media_search_' ) . '%';
+$wpdb->query(
+	$wpdb->prepare(
+		"DELETE FROM {$wpdb->postmeta} WHERE meta_key LIKE %s",
+		$like
+	)
+);

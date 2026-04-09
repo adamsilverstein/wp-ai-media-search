@@ -222,15 +222,24 @@ function ai_media_search_generate_metadata( $attachment_id ) {
  * @param int $attachment_id Attachment post ID.
  */
 function ai_media_search_process_single( $attachment_id ) {
+	// Acquire a per-attachment lock to prevent duplicate AI calls under concurrent cron execution.
+	$lock_key = "ai_media_search_lock_{$attachment_id}";
+	if ( get_transient( $lock_key ) ) {
+		return;
+	}
+	set_transient( $lock_key, 1, 10 * MINUTE_IN_SECONDS );
+
 	$post = get_post( $attachment_id );
 
 	if ( ! $post || 'attachment' !== $post->post_type || ! wp_attachment_is_image( $attachment_id ) ) {
+		delete_transient( $lock_key );
 		return;
 	}
 
 	$status = get_post_meta( $attachment_id, '_wp_ai_media_search_status', true );
 
 	if ( in_array( $status, array( 'complete', 'processing' ), true ) ) {
+		delete_transient( $lock_key );
 		return;
 	}
 
@@ -240,6 +249,7 @@ function ai_media_search_process_single( $attachment_id ) {
 
 	if ( is_wp_error( $metadata ) ) {
 		ai_media_search_handle_failure( $attachment_id, $metadata );
+		delete_transient( $lock_key );
 		return;
 	}
 
@@ -253,6 +263,7 @@ function ai_media_search_process_single( $attachment_id ) {
 	// Mark complete.
 	update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'complete' );
 	delete_post_meta( $attachment_id, '_wp_ai_media_search_error' );
+	delete_transient( $lock_key );
 }
 
 // ─── Error Handling ──────────────────────────────────────────────────────────
@@ -302,7 +313,7 @@ function ai_media_search_batch_process() {
 	 *
 	 * @param int $batch_size Number of images per batch. Default 5.
 	 */
-	$batch_size = (int) apply_filters( 'ai_media_search_batch_size', 5 );
+	$batch_size = max( 1, min( 50, (int) apply_filters( 'ai_media_search_batch_size', 5 ) ) );
 
 	$query = new WP_Query(
 		array(
@@ -371,6 +382,10 @@ function ai_media_search_batch_process() {
  * @return bool
  */
 function ai_media_search_is_attachment_search( $query ) {
+	if ( ! is_admin() ) {
+		return false;
+	}
+
 	if ( ! $query->is_search() ) {
 		return false;
 	}
@@ -467,8 +482,10 @@ function ai_media_search_filter_posts_groupby( $groupby, $query ) {
 
 	$group_id = "{$wpdb->posts}.ID";
 
-	if ( empty( $groupby ) || ! str_contains( $groupby, $group_id ) ) {
+	if ( empty( $groupby ) ) {
 		$groupby = $group_id;
+	} elseif ( ! str_contains( $groupby, $group_id ) ) {
+		$groupby .= ', ' . $group_id;
 	}
 
 	return $groupby;
