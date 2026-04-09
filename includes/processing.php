@@ -56,6 +56,21 @@ function ai_media_search_process_single( $attachment_id ) {
 	$search_text = $metadata['description'] . ' ' . $metadata['tags'];
 	update_post_meta( $attachment_id, '_wp_ai_media_search_text', $search_text );
 
+	// Optionally populate empty alt text for accessibility.
+	/**
+	 * Filters whether to set alt text from the AI description when it is empty.
+	 *
+	 * @param bool $update_alt    Whether to update empty alt text. Default false.
+	 * @param int  $attachment_id Attachment post ID.
+	 */
+	if ( apply_filters( 'ai_media_search_update_alt_text', false, $attachment_id ) ) {
+		$existing_alt = get_post_meta( $attachment_id, '_wp_attachment_image_alt', true );
+
+		if ( empty( $existing_alt ) ) {
+			update_post_meta( $attachment_id, '_wp_attachment_image_alt', $metadata['description'] );
+		}
+	}
+
 	// Mark complete.
 	update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'complete' );
 	delete_post_meta( $attachment_id, '_wp_ai_media_search_error' );
