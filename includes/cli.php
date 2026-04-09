@@ -91,10 +91,7 @@ class AI_Media_Search_CLI {
 
 		foreach ( $attachment_ids as $attachment_id ) {
 			if ( $reset ) {
-				delete_post_meta( $attachment_id, '_wp_ai_media_search_status' );
-				delete_post_meta( $attachment_id, '_wp_ai_media_search_data' );
-				delete_post_meta( $attachment_id, '_wp_ai_media_search_text' );
-				delete_post_meta( $attachment_id, '_wp_ai_media_search_error' );
+				ai_media_search_reset( $attachment_id );
 			}
 
 			ai_media_search_process_single( $attachment_id );

@@ -78,6 +78,19 @@ function ai_media_search_process_single( $attachment_id ) {
 }
 
 /**
+ * Reset AI search metadata for an attachment so it can be re-processed.
+ *
+ * @param int $attachment_id Attachment post ID.
+ */
+function ai_media_search_reset( $attachment_id ) {
+	delete_post_meta( $attachment_id, '_wp_ai_media_search_status' );
+	delete_post_meta( $attachment_id, '_wp_ai_media_search_data' );
+	delete_post_meta( $attachment_id, '_wp_ai_media_search_text' );
+	delete_post_meta( $attachment_id, '_wp_ai_media_search_error' );
+	delete_transient( "ai_media_search_lock_{$attachment_id}" );
+}
+
+/**
  * Handle a processing failure with retry tracking.
  *
  * @param int      $attachment_id Attachment post ID.
