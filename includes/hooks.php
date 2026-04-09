@@ -97,8 +97,30 @@ function ai_media_search_extract_image_ids( $content ) {
  */
 function ai_media_search_collect_image_ids_from_blocks( $blocks, &$ids ) {
 	foreach ( $blocks as $block ) {
-		if ( 'core/image' === $block['blockName'] && ! empty( $block['attrs']['id'] ) ) {
-			$ids[] = (int) $block['attrs']['id'];
+		$name  = $block['blockName'] ?? '';
+		$attrs = $block['attrs'] ?? array();
+
+		switch ( $name ) {
+			case 'core/image':
+			case 'core/cover':
+				if ( ! empty( $attrs['id'] ) ) {
+					$ids[] = (int) $attrs['id'];
+				}
+				break;
+
+			case 'core/media-text':
+				if ( ! empty( $attrs['mediaId'] ) ) {
+					$ids[] = (int) $attrs['mediaId'];
+				}
+				break;
+
+			case 'core/gallery':
+				// Gallery stores image IDs in its inner image blocks,
+				// but legacy galleries use an 'ids' attribute.
+				if ( ! empty( $attrs['ids'] ) && is_array( $attrs['ids'] ) ) {
+					$ids = array_merge( $ids, array_map( 'intval', $attrs['ids'] ) );
+				}
+				break;
 		}
 
 		if ( ! empty( $block['innerBlocks'] ) ) {
