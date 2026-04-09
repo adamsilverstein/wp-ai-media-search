@@ -67,11 +67,14 @@ function ai_media_search_generate_metadata( $attachment_id ) {
 		);
 	}
 
+	$mime       = get_post_mime_type( $attachment_id );
+	$media_type = $mime ? strtok( $mime, '/' ) : 'image';
+
 	return array(
 		'description'  => sanitize_text_field( $decoded['description'] ),
 		'tags'         => sanitize_text_field( $decoded['tags'] ),
 		'generated_at' => time(),
 		'version'      => 1,
-		'media_type'   => 'image',
+		'media_type'   => $media_type,
 	);
 }

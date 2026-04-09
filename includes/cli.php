@@ -201,7 +201,7 @@ class AI_Media_Search_CLI {
 		$query_args = array(
 			'post_type'      => 'attachment',
 			'post_status'    => 'inherit',
-			'post_mime_type' => 'image',
+			'post_mime_type' => ai_media_search_get_supported_mime_types(),
 			'orderby'        => 'date',
 			'order'          => 'DESC',
 			'posts_per_page' => isset( $assoc_args['batch-size'] ) ? (int) $assoc_args['batch-size'] : -1,

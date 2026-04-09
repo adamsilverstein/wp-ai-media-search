@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  * @param int $post_id Attachment post ID.
  */
 function ai_media_search_on_new_attachment( $post_id ) {
-	if ( ! wp_attachment_is_image( $post_id ) ) {
+	if ( ! ai_media_search_is_supported_attachment( $post_id ) ) {
 		return;
 	}
 

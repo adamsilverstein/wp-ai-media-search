@@ -10,6 +10,41 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
+ * Get the supported MIME type prefixes for processing.
+ *
+ * @return string[] Array of MIME type prefixes (e.g., 'image', 'video', 'audio').
+ */
+function ai_media_search_get_supported_mime_types() {
+	/**
+	 * Filters the supported MIME type prefixes.
+	 *
+	 * Add 'video' or 'audio' to extend processing beyond images.
+	 *
+	 * @param string[] $mime_types Array of MIME type prefixes. Default array( 'image' ).
+	 */
+	return apply_filters( 'ai_media_search_supported_mime_types', array( 'image' ) );
+}
+
+/**
+ * Check whether an attachment's MIME type is supported for processing.
+ *
+ * @param int $attachment_id Attachment post ID.
+ * @return bool
+ */
+function ai_media_search_is_supported_attachment( $attachment_id ) {
+	$mime = get_post_mime_type( $attachment_id );
+
+	if ( ! $mime ) {
+		return false;
+	}
+
+	$type_prefix      = strtok( $mime, '/' );
+	$supported_types  = ai_media_search_get_supported_mime_types();
+
+	return in_array( $type_prefix, $supported_types, true );
+}
+
+/**
  * Process a single image: generate AI metadata and store it.
  *
  * Uses a transient-based lock to prevent duplicate AI calls under concurrent
@@ -27,7 +62,7 @@ function ai_media_search_process_single( $attachment_id ) {
 
 	$post = get_post( $attachment_id );
 
-	if ( ! $post || 'attachment' !== $post->post_type || ! wp_attachment_is_image( $attachment_id ) ) {
+	if ( ! $post || 'attachment' !== $post->post_type || ! ai_media_search_is_supported_attachment( $attachment_id ) ) {
 		delete_transient( $lock_key );
 		return;
 	}
@@ -49,11 +84,33 @@ function ai_media_search_process_single( $attachment_id ) {
 		return;
 	}
 
+	/**
+	 * Filters the AI-generated metadata before it is stored.
+	 *
+	 * Allows plugins to modify, enrich, or translate the description and tags.
+	 *
+	 * @param array $metadata      The metadata array (description, tags, generated_at, version, media_type).
+	 * @param int   $attachment_id Attachment post ID.
+	 */
+	$metadata = apply_filters( 'ai_media_search_metadata', $metadata, $attachment_id );
+
 	// Store structured data.
 	update_post_meta( $attachment_id, '_wp_ai_media_search_data', $metadata );
 
 	// Store plain searchable text.
 	$search_text = $metadata['description'] . ' ' . $metadata['tags'];
+
+	/**
+	 * Filters the concatenated search text before it is stored.
+	 *
+	 * Allows plugins to append extra keywords (e.g., EXIF data, taxonomy terms).
+	 *
+	 * @param string $search_text   The search text (description + tags).
+	 * @param array  $metadata      The full metadata array.
+	 * @param int    $attachment_id Attachment post ID.
+	 */
+	$search_text = apply_filters( 'ai_media_search_search_text', $search_text, $metadata, $attachment_id );
+
 	update_post_meta( $attachment_id, '_wp_ai_media_search_text', $search_text );
 
 	// Optionally populate empty alt text for accessibility.
@@ -147,7 +204,7 @@ function ai_media_search_batch_process() {
 		array(
 			'post_type'      => 'attachment',
 			'post_status'    => 'inherit',
-			'post_mime_type' => 'image',
+			'post_mime_type' => ai_media_search_get_supported_mime_types(),
 			'meta_query'     => array(
 				'relation' => 'OR',
 				array(
@@ -209,8 +266,18 @@ function ai_media_search_batch_process() {
 function ai_media_search_get_status_counts() {
 	global $wpdb;
 
+	// Build MIME type WHERE clause from supported types.
+	$mime_types  = ai_media_search_get_supported_mime_types();
+	$mime_wheres = array();
+
+	foreach ( $mime_types as $type ) {
+		$mime_wheres[] = $wpdb->prepare( 'post_mime_type LIKE %s', $wpdb->esc_like( $type ) . '/%' );
+	}
+
+	$mime_clause = '(' . implode( ' OR ', $mime_wheres ) . ')';
+
 	$total = (int) $wpdb->get_var(
-		"SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = 'attachment' AND post_status = 'inherit' AND post_mime_type LIKE 'image/%'"
+		"SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = 'attachment' AND post_status = 'inherit' AND {$mime_clause}"
 	);
 
 	$statuses = array( 'complete', 'processing', 'pending', 'failed', 'skipped' );
@@ -221,7 +288,7 @@ function ai_media_search_get_status_counts() {
 			$wpdb->prepare(
 				"SELECT COUNT(*) FROM {$wpdb->posts} p
 				INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id AND pm.meta_key = '_wp_ai_media_search_status'
-				WHERE p.post_type = 'attachment' AND p.post_status = 'inherit' AND p.post_mime_type LIKE 'image/%%' AND pm.meta_value = %s",
+				WHERE p.post_type = 'attachment' AND p.post_status = 'inherit' AND {$mime_clause} AND pm.meta_value = %s",
 				$status
 			)
 		);
