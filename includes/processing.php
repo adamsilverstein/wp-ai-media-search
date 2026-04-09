@@ -164,3 +164,36 @@ function ai_media_search_batch_process() {
 		ai_media_search_process_single( $attachment_id );
 	}
 }
+
+/**
+ * Get processing status counts for all images.
+ *
+ * @return array Associative array of status => count.
+ */
+function ai_media_search_get_status_counts() {
+	global $wpdb;
+
+	$total = (int) $wpdb->get_var(
+		"SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = 'attachment' AND post_status = 'inherit' AND post_mime_type LIKE 'image/%'"
+	);
+
+	$statuses = array( 'complete', 'processing', 'pending', 'failed', 'skipped' );
+	$counts   = array();
+
+	foreach ( $statuses as $status ) {
+		$counts[ $status ] = (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$wpdb->posts} p
+				INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id AND pm.meta_key = '_wp_ai_media_search_status'
+				WHERE p.post_type = 'attachment' AND p.post_status = 'inherit' AND p.post_mime_type LIKE 'image/%%' AND pm.meta_value = %s",
+				$status
+			)
+		);
+	}
+
+	$tracked                = array_sum( $counts );
+	$counts['unprocessed']  = $total - $tracked;
+	$counts['total']        = $total;
+
+	return $counts;
+}
