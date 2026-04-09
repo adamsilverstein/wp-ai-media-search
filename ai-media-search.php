@@ -66,5 +66,9 @@ register_activation_hook( __FILE__, 'ai_media_search_activate' );
  */
 function ai_media_search_deactivate() {
 	wp_clear_scheduled_hook( 'ai_media_search_batch_process' );
+
+	// wp_unschedule_hook removes all events for a hook regardless of args,
+	// clearing the per-attachment single events scheduled with attachment IDs.
+	wp_unschedule_hook( 'ai_media_search_process_single' );
 }
 register_deactivation_hook( __FILE__, 'ai_media_search_deactivate' );

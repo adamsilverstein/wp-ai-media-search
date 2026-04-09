@@ -74,9 +74,11 @@ function ai_media_search_on_publish( $new_status, $old_status, $post ) {
 function ai_media_search_extract_image_ids( $content ) {
 	$ids = array();
 
-	// Gutenberg image blocks: <!-- wp:image {"id":123} -->
-	if ( preg_match_all( '/wp:image\s+\{"id":(\d+)/', $content, $matches ) ) {
-		$ids = array_merge( $ids, array_map( 'intval', $matches[1] ) );
+	// Gutenberg image blocks: use parse_blocks() for reliable extraction
+	// regardless of attribute order in the block comment.
+	if ( function_exists( 'parse_blocks' ) ) {
+		$blocks = parse_blocks( $content );
+		ai_media_search_collect_image_ids_from_blocks( $blocks, $ids );
 	}
 
 	// Classic editor: class="wp-image-123"
@@ -85,4 +87,22 @@ function ai_media_search_extract_image_ids( $content ) {
 	}
 
 	return array_unique( array_filter( $ids ) );
+}
+
+/**
+ * Recursively collect image attachment IDs from parsed blocks.
+ *
+ * @param array $blocks Parsed blocks array.
+ * @param int[] $ids    Collected IDs (passed by reference).
+ */
+function ai_media_search_collect_image_ids_from_blocks( $blocks, &$ids ) {
+	foreach ( $blocks as $block ) {
+		if ( 'core/image' === $block['blockName'] && ! empty( $block['attrs']['id'] ) ) {
+			$ids[] = (int) $block['attrs']['id'];
+		}
+
+		if ( ! empty( $block['innerBlocks'] ) ) {
+			ai_media_search_collect_image_ids_from_blocks( $block['innerBlocks'], $ids );
+		}
+	}
 }

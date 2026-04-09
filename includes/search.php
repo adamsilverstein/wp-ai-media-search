@@ -83,16 +83,27 @@ function ai_media_search_filter_posts_search( $search, $query ) {
 		return $search;
 	}
 
-	foreach ( $search_terms as $term ) {
-		$like = '%' . $wpdb->esc_like( $term ) . '%';
-		$or_clause = $wpdb->prepare( ' OR (ai_media_search_meta.meta_value LIKE %s)', $like );
+	// Detect exclusion prefix used by WP_Query::parse_search().
+	$exclusion_prefix = apply_filters( 'wp_query_search_exclusion_prefix', '-' );
 
-		// Insert the OR clause before the closing parenthesis of each term's group.
-		// The search clause structure is: AND ((col1 LIKE %s) OR (col2 LIKE %s))
-		// We find the term's LIKE pattern and append our OR before the group closes.
+	foreach ( $search_terms as $term ) {
+		// Check if this is an excluded term (e.g., "-cat").
+		$exclude = $exclusion_prefix && str_starts_with( $term, $exclusion_prefix );
+
+		if ( $exclude ) {
+			$term = substr( $term, strlen( $exclusion_prefix ) );
+		}
+
+		$like = '%' . $wpdb->esc_like( $term ) . '%';
+
+		// Mirror the operator and boolean connector used by core for this term.
+		$like_op = $exclude ? 'NOT LIKE' : 'LIKE';
+		$joiner  = $exclude ? ' AND ' : ' OR ';
+
+		$meta_clause  = $wpdb->prepare( "{$joiner}(ai_media_search_meta.meta_value {$like_op} %s)", $like );
 		$escaped_like = $wpdb->prepare( '%s', $like );
-		$needle       = "({$wpdb->posts}.post_content LIKE {$escaped_like})";
-		$replacement  = $needle . $or_clause;
+		$needle       = "({$wpdb->posts}.post_content {$like_op} {$escaped_like})";
+		$replacement  = $needle . $meta_clause;
 
 		$search = str_replace( $needle, $replacement, $search );
 	}
