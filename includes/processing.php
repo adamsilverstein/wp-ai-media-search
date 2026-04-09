@@ -75,6 +75,14 @@ function ai_media_search_process_single( $attachment_id ) {
 	update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'complete' );
 	delete_post_meta( $attachment_id, '_wp_ai_media_search_error' );
 	delete_transient( $lock_key );
+
+	/**
+	 * Fires after an image has been successfully processed.
+	 *
+	 * @param int   $attachment_id Attachment post ID.
+	 * @param array $metadata      The generated metadata (description, tags, etc.).
+	 */
+	do_action( 'ai_media_search_processed', $attachment_id, $metadata );
 }
 
 /**
