@@ -28,6 +28,22 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 }
 
 /**
+ * Get the cron recurrence interval for batch processing.
+ *
+ * @return string A registered cron schedule name (e.g., 'hourly', 'twicedaily').
+ */
+function ai_media_search_get_cron_interval() {
+	/**
+	 * Filters the cron recurrence interval for batch processing.
+	 *
+	 * Must be a schedule name registered with wp_get_schedules().
+	 *
+	 * @param string $interval Cron schedule name. Default 'hourly'.
+	 */
+	return apply_filters( 'ai_media_search_cron_interval', 'hourly' );
+}
+
+/**
  * Bootstrap the plugin. All hooks are registered here, gated on AI support.
  */
 function ai_media_search_init() {
@@ -52,7 +68,7 @@ function ai_media_search_init() {
 
 	// Self-healing: re-schedule batch cron if it was lost.
 	if ( ! wp_next_scheduled( 'ai_media_search_batch_process' ) ) {
-		wp_schedule_event( time(), 'hourly', 'ai_media_search_batch_process' );
+		wp_schedule_event( time(), ai_media_search_get_cron_interval(), 'ai_media_search_batch_process' );
 	}
 }
 add_action( 'init', 'ai_media_search_init' );
@@ -62,7 +78,7 @@ add_action( 'init', 'ai_media_search_init' );
  */
 function ai_media_search_activate() {
 	if ( ! wp_next_scheduled( 'ai_media_search_batch_process' ) ) {
-		wp_schedule_event( time(), 'hourly', 'ai_media_search_batch_process' );
+		wp_schedule_event( time(), ai_media_search_get_cron_interval(), 'ai_media_search_batch_process' );
 	}
 }
 register_activation_hook( __FILE__, 'ai_media_search_activate' );
