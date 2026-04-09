@@ -183,6 +183,15 @@ function ai_media_search_handle_failure( $attachment_id, $error ) {
 	} else {
 		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'failed' );
 	}
+
+	/**
+	 * Fires when processing an attachment fails.
+	 *
+	 * @param int      $attachment_id Attachment post ID.
+	 * @param WP_Error $error         The error that occurred.
+	 * @param array    $error_data    Error tracking data (code, message, attempts, last_tried).
+	 */
+	do_action( 'ai_media_search_failed', $attachment_id, $error, $error_data );
 }
 
 /**
@@ -234,6 +243,7 @@ function ai_media_search_batch_process() {
 
 	/** This filter is documented in ai_media_search_handle_failure */
 	$max_retries = (int) apply_filters( 'ai_media_search_max_retries', 3 );
+	$processed   = 0;
 
 	foreach ( $query->posts as $attachment_id ) {
 		// For failed items, check retry eligibility.
@@ -255,7 +265,15 @@ function ai_media_search_batch_process() {
 		}
 
 		ai_media_search_process_single( $attachment_id );
+		$processed++;
 	}
+
+	/**
+	 * Fires after a batch cron run completes.
+	 *
+	 * @param int $processed Number of attachments processed in this batch.
+	 */
+	do_action( 'ai_media_search_batch_complete', $processed );
 }
 
 /**
