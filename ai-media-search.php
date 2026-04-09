@@ -22,6 +22,7 @@ require_once __DIR__ . '/includes/processing.php';
 require_once __DIR__ . '/includes/hooks.php';
 require_once __DIR__ . '/includes/search.php';
 require_once __DIR__ . '/includes/rest-api.php';
+require_once __DIR__ . '/includes/admin.php';
 
 if ( defined( 'WP_CLI' ) && WP_CLI ) {
 	require_once __DIR__ . '/includes/cli.php';
