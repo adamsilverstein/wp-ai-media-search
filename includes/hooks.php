@@ -48,9 +48,9 @@ function ai_media_search_on_publish( $new_status, $old_status, $post ) {
 	$attachment_ids = ai_media_search_extract_image_ids( $post->post_content );
 
 	foreach ( $attachment_ids as $attachment_id ) {
-		$status = get_post_meta( $attachment_id, '_wp_ai_media_search_status', true );
-
-		if ( in_array( $status, array( 'complete', 'processing' ), true ) ) {
+		// Use the shared eligibility check so retry backoff and skipped state
+		// are respected — we never rewrite a failed/skipped item back to pending.
+		if ( ! ai_media_search_can_process_attachment( $attachment_id ) ) {
 			continue;
 		}
 
@@ -58,7 +58,13 @@ function ai_media_search_on_publish( $new_status, $old_status, $post ) {
 			continue;
 		}
 
-		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'pending' );
+		// Only set pending for truly unprocessed items. Failed items keep their
+		// existing status so retry backoff stays in effect.
+		$status = get_post_meta( $attachment_id, '_wp_ai_media_search_status', true );
+		if ( empty( $status ) ) {
+			update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'pending' );
+		}
+
 		wp_schedule_single_event( time() + 5, 'ai_media_search_process_single', array( $attachment_id ) );
 	}
 }

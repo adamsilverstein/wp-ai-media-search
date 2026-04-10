@@ -50,7 +50,7 @@ wp ai-media-search regenerate --all
 
 ## REST API
 
-```
+```http
 GET /wp-json/ai-media-search/v1/status
 ```
 

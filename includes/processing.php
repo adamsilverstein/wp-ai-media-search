@@ -45,32 +45,106 @@ function ai_media_search_is_supported_attachment( $attachment_id ) {
 }
 
 /**
- * Process a single image: generate AI metadata and store it.
+ * Determine whether an attachment is eligible for processing.
  *
- * Uses a transient-based lock to prevent duplicate AI calls under concurrent
- * cron execution.
+ * Enforces the same rules for all callers:
+ * - Must be an existing attachment with a supported MIME type
+ * - Must not already be complete or currently processing
+ * - Must not be skipped (permanent give-up)
+ * - If failed, must be past the retry cooldown and under max retries
  *
  * @param int $attachment_id Attachment post ID.
+ * @return bool Whether the attachment can be processed now.
  */
-function ai_media_search_process_single( $attachment_id ) {
-	// Acquire a per-attachment lock to prevent duplicate AI calls under concurrent cron execution.
-	$lock_key = "ai_media_search_lock_{$attachment_id}";
-	if ( get_transient( $lock_key ) ) {
-		return;
-	}
-	set_transient( $lock_key, 1, 10 * MINUTE_IN_SECONDS );
-
+function ai_media_search_can_process_attachment( $attachment_id ) {
 	$post = get_post( $attachment_id );
 
 	if ( ! $post || 'attachment' !== $post->post_type || ! ai_media_search_is_supported_attachment( $attachment_id ) ) {
-		delete_transient( $lock_key );
-		return;
+		return false;
 	}
 
 	$status = get_post_meta( $attachment_id, '_wp_ai_media_search_status', true );
 
-	if ( in_array( $status, array( 'complete', 'processing' ), true ) ) {
-		delete_transient( $lock_key );
+	if ( in_array( $status, array( 'complete', 'processing', 'skipped' ), true ) ) {
+		return false;
+	}
+
+	if ( 'failed' === $status ) {
+		/**
+		 * Filters the maximum number of retry attempts before an attachment
+		 * is marked as skipped.
+		 *
+		 * @param int $max_retries Max retry attempts. Default 3.
+		 */
+		$max_retries = (int) apply_filters( 'ai_media_search_max_retries', 3 );
+		$error       = get_post_meta( $attachment_id, '_wp_ai_media_search_error', true );
+
+		if ( is_array( $error ) ) {
+			if ( ( $error['attempts'] ?? 0 ) >= $max_retries ) {
+				return false;
+			}
+
+			// Enforce 1-hour cooldown between retries.
+			if ( ( $error['last_tried'] ?? 0 ) > ( time() - HOUR_IN_SECONDS ) ) {
+				return false;
+			}
+		}
+	}
+
+	return true;
+}
+
+/**
+ * Attempt to acquire an atomic per-attachment lock.
+ *
+ * Uses add_option() which is atomic at the database level: only one concurrent
+ * worker will succeed in inserting the row. The option is non-autoloaded so it
+ * does not bloat the options cache.
+ *
+ * @param int $attachment_id Attachment post ID.
+ * @return bool True if the lock was acquired, false if already held.
+ */
+function ai_media_search_acquire_lock( $attachment_id ) {
+	$lock_key = "ai_media_search_lock_{$attachment_id}";
+
+	// add_option returns false if the option already exists, making this atomic.
+	// Suppress errors from duplicate-key failures.
+	// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+	return @add_option( $lock_key, time(), '', 'no' );
+}
+
+/**
+ * Release a per-attachment lock.
+ *
+ * @param int $attachment_id Attachment post ID.
+ */
+function ai_media_search_release_lock( $attachment_id ) {
+	delete_option( "ai_media_search_lock_{$attachment_id}" );
+}
+
+/**
+ * Process a single image: generate AI metadata and store it.
+ *
+ * Uses an atomic option-based lock to prevent duplicate AI calls under
+ * concurrent execution. Enforces retry/backoff rules via the shared
+ * eligibility helper.
+ *
+ * @param int $attachment_id Attachment post ID.
+ */
+function ai_media_search_process_single( $attachment_id ) {
+	// Check eligibility BEFORE acquiring the lock to avoid leaving stale locks.
+	if ( ! ai_media_search_can_process_attachment( $attachment_id ) ) {
+		return;
+	}
+
+	// Acquire atomic lock. If it's already held, another worker has it.
+	if ( ! ai_media_search_acquire_lock( $attachment_id ) ) {
+		return;
+	}
+
+	// Re-check eligibility after acquiring the lock in case state changed.
+	if ( ! ai_media_search_can_process_attachment( $attachment_id ) ) {
+		ai_media_search_release_lock( $attachment_id );
 		return;
 	}
 
@@ -80,7 +154,7 @@ function ai_media_search_process_single( $attachment_id ) {
 
 	if ( is_wp_error( $metadata ) ) {
 		ai_media_search_handle_failure( $attachment_id, $metadata );
-		delete_transient( $lock_key );
+		ai_media_search_release_lock( $attachment_id );
 		return;
 	}
 
@@ -131,7 +205,7 @@ function ai_media_search_process_single( $attachment_id ) {
 	// Mark complete.
 	update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'complete' );
 	delete_post_meta( $attachment_id, '_wp_ai_media_search_error' );
-	delete_transient( $lock_key );
+	ai_media_search_release_lock( $attachment_id );
 
 	/**
 	 * Fires after an image has been successfully processed.
@@ -152,7 +226,7 @@ function ai_media_search_reset( $attachment_id ) {
 	delete_post_meta( $attachment_id, '_wp_ai_media_search_data' );
 	delete_post_meta( $attachment_id, '_wp_ai_media_search_text' );
 	delete_post_meta( $attachment_id, '_wp_ai_media_search_error' );
-	delete_transient( "ai_media_search_lock_{$attachment_id}" );
+	ai_media_search_release_lock( $attachment_id );
 }
 
 /**
@@ -166,7 +240,7 @@ function ai_media_search_handle_failure( $attachment_id, $error ) {
 	$attempts = is_array( $existing ) ? (int) ( $existing['attempts'] ?? 0 ) : 0;
 	$attempts++;
 
-	/** This filter is documented in ai_media_search_batch_process */
+	/** This filter is documented in ai_media_search_can_process_attachment */
 	$max_retries = (int) apply_filters( 'ai_media_search_max_retries', 3 );
 
 	$error_data = array(
@@ -241,29 +315,11 @@ function ai_media_search_batch_process() {
 		return;
 	}
 
-	/** This filter is documented in ai_media_search_handle_failure */
-	$max_retries = (int) apply_filters( 'ai_media_search_max_retries', 3 );
-	$processed   = 0;
+	$processed = 0;
 
 	foreach ( $query->posts as $attachment_id ) {
-		// For failed items, check retry eligibility.
-		$status = get_post_meta( $attachment_id, '_wp_ai_media_search_status', true );
-
-		if ( 'failed' === $status ) {
-			$error = get_post_meta( $attachment_id, '_wp_ai_media_search_error', true );
-
-			if ( is_array( $error ) ) {
-				if ( ( $error['attempts'] ?? 0 ) >= $max_retries ) {
-					continue;
-				}
-
-				// Skip if last attempt was less than 1 hour ago.
-				if ( ( $error['last_tried'] ?? 0 ) > ( time() - HOUR_IN_SECONDS ) ) {
-					continue;
-				}
-			}
-		}
-
+		// Eligibility (including retry cooldown) is enforced inside
+		// ai_media_search_process_single() via the shared helper.
 		ai_media_search_process_single( $attachment_id );
 		$processed++;
 	}
