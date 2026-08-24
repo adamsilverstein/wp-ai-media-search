@@ -1,12 +1,12 @@
 name: Update WordPress.org assets and readme
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'readme.txt'
-      - '.wordpress-org/**'
+  # Only push to wordpress.org when a release is published, never on a plain
+  # push to main. Also available on demand so the listing can be corrected
+  # between releases without cutting a new version.
+  release:
+    types: [released]
+  workflow_dispatch:
 
 jobs:
   trunk:
