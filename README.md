@@ -20,6 +20,25 @@ The plugin never overwrites user-entered metadata (title, caption, description, 
 - PHP 8.1+
 - An AI provider configured in WordPress (Anthropic, Google, or OpenAI)
 
+## In the admin
+
+Every image gets an **AI Media Search** panel showing what the AI wrote about
+it, the tags it came up with, and where it is in the queue:
+
+- On the **Edit Media** screen, as a meta box in the sidebar.
+- In the **media modal**, in the attachment details next to alt text and caption.
+
+When an image failed or was skipped, the panel says so and prints the stored
+error, so the reason a search missed an image is visible without a database
+query.
+
+A **Regenerate** button in the same panel throws the stored data away and asks
+the AI again. It posts to the REST endpoint below and swaps the panel out in
+place, so nothing reloads. The button only appears for users who can edit that
+attachment, and only while an AI provider is configured.
+
+Settings > Media keeps the library-wide status summary.
+
 ## WP-CLI Commands
 
 ```bash
@@ -68,6 +87,17 @@ Returns processing counts. Requires `upload_files` capability.
 }
 ```
 
+```http
+POST /wp-json/ai-media-search/v1/attachments/<id>/regenerate
+```
+
+Clears the stored data for one attachment and describes it again, returning the
+new state along with the re-rendered admin panel. Requires the `edit_post`
+capability for that attachment, plus a `nonce` parameter for the
+`ai_media_search_regenerate_<id>` action. This is the endpoint behind the
+Regenerate button; the AI call runs inline, so the request stays open for as
+long as the provider takes.
+
 ## Filters
 
 | Filter | Default | Description |
@@ -83,6 +113,7 @@ Returns processing counts. Requires `upload_files` capability.
 | `ai_media_search_search_text` | *(description + tags)* | Filter concatenated search text before storage. Receives `$search_text, $metadata, $attachment_id`. |
 | `ai_media_search_supported_mime_types` | `['image']` | MIME type prefixes to process. Add `'video'` or `'audio'` to extend. |
 | `ai_media_search_cron_interval` | `'hourly'` | Cron recurrence schedule name for batch processing. |
+| `ai_media_search_admin_script_screens` | `['post', 'upload', 'media', 'site-editor', 'widgets', 'customize']` | Admin screen bases (`WP_Screen::$base`) that load the Regenerate button script. |
 
 ### Examples
 
@@ -136,6 +167,7 @@ add_filter( 'ai_media_search_cron_interval', function () {
 | `ai_media_search_processed` | `$attachment_id, $metadata` | Fires after an attachment is successfully processed. |
 | `ai_media_search_failed` | `$attachment_id, $error, $error_data` | Fires when processing fails. `$error_data` includes attempt count. |
 | `ai_media_search_batch_complete` | `$processed` | Fires after a batch cron run with the count of items processed. |
+| `ai_media_search_regenerated` | `$attachment_id, $status` | Fires after a manual regeneration, whether it succeeded or failed. |
 
 ## Development
 
