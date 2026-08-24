@@ -38,3 +38,6 @@ $ai_media_search_lock_names = $wpdb->get_col(
 foreach ( $ai_media_search_lock_names as $ai_media_search_lock_name ) {
 	delete_option( $ai_media_search_lock_name );
 }
+
+// Cached processing status counts.
+delete_transient( 'ai_media_search_status_counts' );

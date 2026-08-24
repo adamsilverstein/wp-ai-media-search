@@ -82,6 +82,11 @@ GET /wp-json/ai-media-search/v1/status
 
 Returns processing counts. Requires `upload_files` capability.
 
+Counts are cached for five minutes and refreshed as soon as any attachment's
+processing status changes, so polling this endpoint does not recount the media
+library each time. Use `ai_media_search_status_counts_ttl` to change or disable
+the cache.
+
 ```json
 {
   "complete": 142,
@@ -122,6 +127,7 @@ long as the provider takes.
 | `ai_media_search_search_text` | *(description + tags)* | Filter concatenated search text before storage. Receives `$search_text, $metadata, $attachment_id`. |
 | `ai_media_search_supported_mime_types` | `['image']` | MIME type prefixes to process. Add `'video'` or `'audio'` to extend. |
 | `ai_media_search_cron_interval` | `'hourly'` | Cron recurrence schedule name for batch processing. |
+| `ai_media_search_status_counts_ttl` | `300` | Seconds the processing status counts are cached. The cache is dropped whenever a status changes; return `0` to recount on every call. |
 | `ai_media_search_is_attachment_search` | *(admin and REST media searches)* | Whether a query searches the AI text. Receives `$is_attachment_search, $query`. |
 | `ai_media_search_admin_script_screens` | `['post', 'upload', 'media', 'site-editor', 'widgets', 'customize']` | Admin screen bases (`WP_Screen::$base`) that load the Regenerate button script. |
 
