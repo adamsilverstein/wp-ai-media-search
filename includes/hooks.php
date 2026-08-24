@@ -87,7 +87,7 @@ function ai_media_search_extract_image_ids( $content ) {
 		ai_media_search_collect_image_ids_from_blocks( $blocks, $ids );
 	}
 
-	// Classic editor: class="wp-image-123"
+	// Classic editor: match the wp-image-123 class core adds to inserted images.
 	if ( preg_match_all( '/wp-image-(\d+)/', $content, $matches ) ) {
 		$ids = array_merge( $ids, array_map( 'intval', $matches[1] ) );
 	}

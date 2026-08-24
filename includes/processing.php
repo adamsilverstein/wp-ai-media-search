@@ -38,8 +38,8 @@ function ai_media_search_is_supported_attachment( $attachment_id ) {
 		return false;
 	}
 
-	$type_prefix      = strtok( $mime, '/' );
-	$supported_types  = ai_media_search_get_supported_mime_types();
+	$type_prefix     = strtok( $mime, '/' );
+	$supported_types = ai_media_search_get_supported_mime_types();
 
 	return in_array( $type_prefix, $supported_types, true );
 }
@@ -52,6 +52,11 @@ function ai_media_search_is_supported_attachment( $attachment_id ) {
  * - Must not already be complete or currently processing
  * - Must not be skipped (permanent give-up)
  * - If failed, must be past the retry cooldown and under max retries
+ *
+ * Reads live post meta, so the answer can change between calls - callers
+ * deliberately re-check after taking the processing lock.
+ *
+ * @phpstan-impure
  *
  * @param int $attachment_id Attachment post ID.
  * @return bool Whether the attachment can be processed now.
@@ -108,9 +113,11 @@ function ai_media_search_acquire_lock( $attachment_id ) {
 	$lock_key = "ai_media_search_lock_{$attachment_id}";
 
 	// add_option returns false if the option already exists, making this atomic.
-	// Suppress errors from duplicate-key failures.
+	// Suppress errors from duplicate-key failures. Passing false for $autoload
+	// keeps the lock out of the autoloaded options; the 'no' string form is
+	// deprecated as of WordPress 6.7.
 	// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-	return @add_option( $lock_key, time(), '', 'no' );
+	return @add_option( $lock_key, time(), '', false );
 }
 
 /**
@@ -238,7 +245,7 @@ function ai_media_search_reset( $attachment_id ) {
 function ai_media_search_handle_failure( $attachment_id, $error ) {
 	$existing = get_post_meta( $attachment_id, '_wp_ai_media_search_error', true );
 	$attempts = is_array( $existing ) ? (int) ( $existing['attempts'] ?? 0 ) : 0;
-	$attempts++;
+	++$attempts;
 
 	/** This filter is documented in ai_media_search_can_process_attachment */
 	$max_retries = (int) apply_filters( 'ai_media_search_max_retries', 3 );
@@ -288,6 +295,7 @@ function ai_media_search_batch_process() {
 			'post_type'      => 'attachment',
 			'post_status'    => 'inherit',
 			'post_mime_type' => ai_media_search_get_supported_mime_types(),
+			// phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- Finding unprocessed attachments requires a meta comparison; the result set is capped by the batch size.
 			'meta_query'     => array(
 				'relation' => 'OR',
 				array(
@@ -321,7 +329,7 @@ function ai_media_search_batch_process() {
 		// Eligibility (including retry cooldown) is enforced inside
 		// ai_media_search_process_single() via the shared helper.
 		ai_media_search_process_single( $attachment_id );
-		$processed++;
+		++$processed;
 	}
 
 	/**
@@ -350,14 +358,20 @@ function ai_media_search_get_status_counts() {
 
 	$mime_clause = '(' . implode( ' OR ', $mime_wheres ) . ')';
 
-	$total = (int) $wpdb->get_var(
-		"SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = 'attachment' AND post_status = 'inherit' AND {$mime_clause}"
-	);
+	// $mime_clause is assembled above entirely from $wpdb->prepare() output, so
+	// it is already safe to interpolate. Counts are live figures shown in the
+	// admin and over REST, so they are deliberately not cached.
+	// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+	$total = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = 'attachment' AND post_status = 'inherit' AND {$mime_clause}" );
 
 	$statuses = array( 'complete', 'processing', 'pending', 'failed', 'skipped' );
 	$counts   = array();
 
 	foreach ( $statuses as $status ) {
+		// See the note above; $mime_clause is prepared and the counts are
+		// intentionally uncached. The disable/enable pair is needed because the
+		// interpolation falls on a continuation line of the SQL string.
+		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 		$counts[ $status ] = (int) $wpdb->get_var(
 			$wpdb->prepare(
 				"SELECT COUNT(*) FROM {$wpdb->posts} p
@@ -366,11 +380,12 @@ function ai_media_search_get_status_counts() {
 				$status
 			)
 		);
+		// phpcs:enable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 	}
 
-	$tracked                = array_sum( $counts );
-	$counts['unprocessed']  = $total - $tracked;
-	$counts['total']        = $total;
+	$tracked               = array_sum( $counts );
+	$counts['unprocessed'] = $total - $tracked;
+	$counts['total']       = $total;
 
 	return $counts;
 }

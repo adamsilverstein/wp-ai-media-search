@@ -73,8 +73,8 @@ class AI_Media_Search_CLI {
 			return;
 		}
 
-		$count   = count( $attachment_ids );
-		$label   = $dry_run ? 'Would process' : 'Processing';
+		$count = count( $attachment_ids );
+		$label = $dry_run ? 'Would process' : 'Processing';
 		WP_CLI::log( "{$label} {$count} image(s)..." );
 
 		if ( $dry_run ) {
@@ -85,9 +85,9 @@ class AI_Media_Search_CLI {
 			return;
 		}
 
-		$progress  = WP_CLI\Utils\make_progress_bar( 'Processing images', $count );
-		$success   = 0;
-		$failed    = 0;
+		$progress = WP_CLI\Utils\make_progress_bar( 'Processing images', $count );
+		$success  = 0;
+		$failed   = 0;
 
 		foreach ( $attachment_ids as $attachment_id ) {
 			if ( $reset ) {
@@ -99,9 +99,9 @@ class AI_Media_Search_CLI {
 			$status = get_post_meta( $attachment_id, '_wp_ai_media_search_status', true );
 
 			if ( 'complete' === $status ) {
-				$success++;
+				++$success;
 			} else {
-				$failed++;
+				++$failed;
 				$error = get_post_meta( $attachment_id, '_wp_ai_media_search_error', true );
 				$msg   = is_array( $error ) ? $error['message'] : 'Unknown error';
 				WP_CLI::warning( "#{$attachment_id}: {$msg}" );
@@ -134,7 +134,7 @@ class AI_Media_Search_CLI {
 	 * @param array $args       Positional arguments.
 	 * @param array $assoc_args Associative arguments.
 	 */
-	public function status( $args, $assoc_args ) {
+	public function status( $args, $assoc_args ) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter -- Both arguments are part of the WP-CLI command signature.
 		$counts = ai_media_search_get_status_counts();
 
 		$rows = array();
@@ -192,8 +192,8 @@ class AI_Media_Search_CLI {
 					'compare' => 'NOT EXISTS',
 				),
 				array(
-					'key'   => '_wp_ai_media_search_status',
-					'value' => array( 'pending', 'failed' ),
+					'key'     => '_wp_ai_media_search_status',
+					'value'   => array( 'pending', 'failed' ),
 					'compare' => 'IN',
 				),
 			);
@@ -210,6 +210,7 @@ class AI_Media_Search_CLI {
 		);
 
 		if ( ! empty( $meta_query ) ) {
+			// phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- Selecting unprocessed attachments requires a meta comparison.
 			$query_args['meta_query'] = $meta_query;
 		}
 

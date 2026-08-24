@@ -130,6 +130,20 @@ add_filter( 'ai_media_search_cron_interval', function () {
 | `ai_media_search_failed` | `$attachment_id, $error, $error_data` | Fires when processing fails. `$error_data` includes attempt count. |
 | `ai_media_search_batch_complete` | `$processed` | Fires after a batch cron run with the count of items processed. |
 
+## Development
+
+Coding standards and static analysis run on every push and pull request. To run them locally:
+
+```bash
+composer install
+composer lint      # PHPCS: WordPress Coding Standards + PHPCompatibilityWP (8.1+)
+composer lint:fix  # PHPCBF: fix what can be fixed automatically
+composer analyze   # PHPStan level 5, via szepeviktor/phpstan-wordpress
+```
+
+Configuration lives in `phpcs.xml.dist` and `phpstan.neon.dist`. None of the dev
+tooling ships in the WordPress.org build.
+
 ## Uninstall
 
 Deactivating the plugin stops processing and search integration but preserves all generated metadata. Deleting the plugin removes all `_wp_ai_media_search_*` meta from the database.

@@ -83,7 +83,9 @@ function ai_media_search_filter_posts_search( $search, $query ) {
 		return $search;
 	}
 
-	// Detect exclusion prefix used by WP_Query::parse_search().
+	// Detect exclusion prefix used by WP_Query::parse_search(). This is a core
+	// filter, so it is intentionally read here without the plugin prefix.
+	// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound
 	$exclusion_prefix = apply_filters( 'wp_query_search_exclusion_prefix', '-' );
 
 	foreach ( $search_terms as $term ) {
@@ -100,6 +102,9 @@ function ai_media_search_filter_posts_search( $search, $query ) {
 		$like_op = $exclude ? 'NOT LIKE' : 'LIKE';
 		$joiner  = $exclude ? ' AND ' : ' OR ';
 
+		// $joiner and $like_op are literals chosen above, not user input; only
+		// the LIKE value is interpolated, and that goes through a placeholder.
+		// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$meta_clause  = $wpdb->prepare( "{$joiner}(ai_media_search_meta.meta_value {$like_op} %s)", $like );
 		$escaped_like = $wpdb->prepare( '%s', $like );
 		$needle       = "({$wpdb->posts}.post_content {$like_op} {$escaped_like})";
