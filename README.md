@@ -13,6 +13,14 @@ Upload an image of a cat, and later search your media library for "cat" — even
 5. The description and tags are written in the site language, so a German site gets German text to search against.
 6. The description and tags are stored as post meta and included in media library search queries, both on the Media Library screen and in the block editor's media inserter.
 
+Every AI call is a blocking request that can take several seconds, so neither
+path is allowed to hand one PHP request more work than it can finish. A batch
+run stops between images once it has spent its share of `max_execution_time`
+(`ai_media_search_batch_time_budget`), leaves the rest of the batch exactly as
+it found it, and queues a follow-up run so a backlog keeps draining. Publishing
+a post spaces its images 30 seconds apart (`ai_media_search_queue_stagger`)
+rather than making one cron request describe an entire gallery.
+
 A run that dies mid-flight - a PHP timeout, a fatal error, a restarted worker -
 leaves an image marked `processing`. Anything still in that state after
 `ai_media_search_processing_timeout` seconds (15 minutes by default) is treated
@@ -80,11 +88,14 @@ Returns processing counts. Requires `upload_files` capability.
 | Filter | Default | Description |
 |--------|---------|-------------|
 | `ai_media_search_batch_size` | `5` | Images per cron batch (clamped 1–50). |
+| `ai_media_search_batch_time_budget` | *(80% of `max_execution_time`, or `180`)* | Seconds a batch run may spend before it stops between images and leaves the rest for the next run. Receives `$budget, $max_execution_time`. A run always processes at least one image. |
+| `ai_media_search_batch_followup_delay` | `120` | Seconds before the extra batch run queued when a run stops early with work left over. Zero or less turns follow-up runs off. |
 | `ai_media_search_prompt` | *(built-in)* | AI prompt text. Receives `$prompt, $attachment_id`. |
 | `ai_media_search_language` | *(from `get_locale()`)* | Language the description and tags are written in, as an English language name such as `French`. Receives `$language, $locale, $attachment_id`. |
 | `ai_media_search_pre_prompt_image` | `null` | Return a JSON string or `WP_Error` to skip the AI request entirely. Receives `$response, $prompt, $file_path, $mime_type, $attachment_id`. |
 | `ai_media_search_image_size` | `'large'` | Registered image size sent to the AI. Use `'full'` to send the original. Receives `$size, $attachment_id`. |
 | `ai_media_search_should_process` | `true` | Skip specific attachments. Receives `$should, $attachment_id`. |
+| `ai_media_search_queue_stagger` | `30` | Seconds between the per-image jobs queued when a post is published. `0` queues them all for the same moment. |
 | `ai_media_search_max_retries` | `3` | Max retry attempts before marking as skipped. |
 | `ai_media_search_processing_timeout` | `900` | Seconds an attachment may sit in `processing` before the run that owns it is presumed dead and the attachment is retried. Clamped to a minimum of 60. |
 | `ai_media_search_update_alt_text` | `false` | When true, writes AI description to empty alt text fields. |
@@ -138,6 +149,16 @@ add_filter( 'ai_media_search_supported_mime_types', function ( $types ) {
     return $types;
 } );
 
+// Let a batch run longer on a host that allows long-running requests.
+add_filter( 'ai_media_search_batch_time_budget', function () {
+    return 120;
+} );
+
+// Spread a gallery post's images over five minutes each instead of thirty seconds.
+add_filter( 'ai_media_search_queue_stagger', function () {
+    return 5 * MINUTE_IN_SECONDS;
+} );
+
 // Run batch processing every 30 minutes instead of hourly.
 add_filter( 'ai_media_search_cron_interval', function () {
     return 'every_thirty_minutes'; // Must be registered with wp_get_schedules().
@@ -158,7 +179,7 @@ add_filter( 'ai_media_search_is_attachment_search', function ( $is_attachment_se
 |--------|-----------|-------------|
 | `ai_media_search_processed` | `$attachment_id, $metadata` | Fires after an attachment is successfully processed. |
 | `ai_media_search_failed` | `$attachment_id, $error, $error_data` | Fires when processing fails. `$error_data` includes attempt count. |
-| `ai_media_search_batch_complete` | `$processed` | Fires after a batch cron run with the count of items processed. |
+| `ai_media_search_batch_complete` | `$processed, $remaining` | Fires after a batch cron run with the count of items processed and the count left for the next run because the time budget was spent. |
 
 ## Development
 
