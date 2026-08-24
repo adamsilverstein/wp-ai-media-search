@@ -501,16 +501,225 @@ class Test_AI_Media_Search_Search extends AI_Media_Search_TestCase {
 	}
 
 	/**
-	 * An `exact` search should still consult the AI metadata.
+	 * An `exact` search still consults the AI metadata.
 	 *
-	 * Skipped: the clause is spliced in by rebuilding core's SQL string, which
-	 * does not match what core emits for an exact query, so the replace no-ops.
-	 * That is issue #10.
+	 * Core matches the whole column for an exact query, so the AI text has to
+	 * be matched the same way: the image described as exactly "cat" is a hit
+	 * and the one with a sentence about a cat is not.
 	 *
 	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/10
+	 *
+	 * @covers ::ai_media_search_filter_posts_search
 	 */
 	public function test_exact_search_uses_ai_metadata() {
-		$this->markTestSkipped( 'Exact queries bypass the AI clause. See issue #10.' );
+		$exact = $this->create_image_attachment( array( 'post_title' => 'IMG_0001' ) );
+		$this->set_search_text( $exact, 'cat' );
+
+		$sentence = $this->create_image_attachment( array( 'post_title' => 'IMG_0002' ) );
+		$this->set_search_text( $sentence, 'A tabby cat asleep on a windowsill.' );
+
+		$this->go_to_admin();
+
+		$this->assertSame(
+			array( $exact ),
+			$this->search_media( 'cat', array( 'exact' => true ) )
+		);
+	}
+
+	/**
+	 * A `sentence` search matches the whole phrase against the AI metadata.
+	 *
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/10
+	 *
+	 * @covers ::ai_media_search_filter_posts_search
+	 */
+	public function test_sentence_search_uses_ai_metadata() {
+		$phrase = $this->create_image_attachment( array( 'post_title' => 'IMG_0001' ) );
+		$this->set_search_text( $phrase, 'A tabby cat asleep on a windowsill. cat, tabby' );
+
+		$scattered = $this->create_image_attachment( array( 'post_title' => 'IMG_0002' ) );
+		$this->set_search_text( $scattered, 'A cat asleep in a basket. cat, tabby' );
+
+		$this->go_to_admin();
+
+		$this->assertSame(
+			array( $phrase ),
+			$this->search_media( 'tabby cat asleep', array( 'sentence' => true ) )
+		);
+	}
+
+	/**
+	 * Narrowing the searched columns does not turn the AI metadata off.
+	 *
+	 * `post_search_columns` decides which post columns core searches. The AI
+	 * text is not one of them, so it stays searchable, but the narrowing itself
+	 * still has to hold for the columns it does cover.
+	 *
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/10
+	 *
+	 * @covers ::ai_media_search_filter_posts_search
+	 * @covers ::ai_media_search_get_search_columns
+	 */
+	public function test_search_columns_filter_keeps_the_ai_metadata_searchable() {
+		$by_ai_text = $this->create_image_attachment( array( 'post_title' => 'IMG_0001' ) );
+		$this->set_search_text( $by_ai_text, 'A tabby cat asleep on a windowsill. cat, tabby' );
+
+		$by_content = $this->create_image_attachment(
+			array(
+				'post_title'   => 'IMG_0002',
+				'post_content' => 'A cat in the long grass.',
+			)
+		);
+
+		add_filter(
+			'post_search_columns',
+			static function () {
+				return array( 'post_title' );
+			}
+		);
+
+		$this->go_to_admin();
+
+		// The AI text is still searched; post_content no longer is.
+		$this->assertSame( array( $by_ai_text ), $this->search_media( 'cat' ) );
+		$this->assertNotContains( $by_content, $this->search_media( 'cat' ) );
+	}
+
+	/**
+	 * Another plugin rewriting the clause first does not disable AI search.
+	 *
+	 * The AI condition is composed here rather than pattern matched into the
+	 * incoming SQL, so a clause this plugin has never seen before is combined
+	 * with it instead of silently missing the splice point.
+	 *
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/10
+	 *
+	 * @covers ::ai_media_search_filter_posts_search
+	 */
+	public function test_ai_metadata_survives_an_earlier_posts_search_filter() {
+		$by_ai_text = $this->create_image_attachment( array( 'post_title' => 'IMG_0001' ) );
+		$this->set_search_text( $by_ai_text, 'A tabby cat asleep on a windowsill. cat, tabby' );
+
+		$by_title = $this->create_image_attachment( array( 'post_title' => 'A cat photo' ) );
+
+		// Stand in for a plugin that rewrites the search clause to titles only.
+		add_filter(
+			'posts_search',
+			static function ( $search, $query ) {
+				if ( ! $query->is_search() ) {
+					return $search;
+				}
+
+				global $wpdb;
+
+				$rewritten = '';
+
+				foreach ( (array) $query->get( 'search_terms' ) as $term ) {
+					// Only the value varies, and that goes through a placeholder.
+					// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+					$rewritten .= $wpdb->prepare(
+						" AND ({$wpdb->posts}.post_title LIKE %s)",
+						'%' . $wpdb->esc_like( $term ) . '%'
+					);
+				}
+
+				return $rewritten;
+			},
+			5,
+			2
+		);
+
+		$this->go_to_admin();
+
+		$this->assertSame(
+			$this->sorted( array( $by_ai_text, $by_title ) ),
+			$this->sorted( $this->search_media( 'cat' ) )
+		);
+	}
+
+	/**
+	 * Running the filter twice over one clause leaves it as it was.
+	 *
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/10
+	 *
+	 * @covers ::ai_media_search_filter_posts_search
+	 */
+	public function test_search_clause_is_not_applied_twice() {
+		global $wpdb;
+
+		$this->go_to_admin();
+
+		$query = new WP_Query();
+		$query->parse_query(
+			array(
+				'post_type' => 'attachment',
+				's'         => 'cat',
+			)
+		);
+		$query->is_search = true;
+		$query->set( 'search_terms', array( 'cat' ) );
+
+		$once  = ai_media_search_filter_posts_search( " AND (({$wpdb->posts}.post_title LIKE '%cat%'))", $query );
+		$twice = ai_media_search_filter_posts_search( $once, $query );
+
+		$this->assertStringContainsString( 'ai_media_search_meta.meta_value', $once );
+		$this->assertSame( $once, $twice );
+	}
+
+	/**
+	 * A password protected match stays hidden from a logged out visitor.
+	 *
+	 * Core guards its own search clause with `post_password = ''` when nobody is
+	 * logged in. The AI condition is offered as an alternative to that clause,
+	 * so it has to carry the same guard rather than route around it.
+	 *
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/10
+	 *
+	 * @covers ::ai_media_search_filter_posts_search
+	 */
+	public function test_password_protected_matches_stay_hidden_from_visitors() {
+		$protected = $this->create_image_attachment(
+			array(
+				'post_title'    => 'IMG_0001',
+				'post_password' => 'secret',
+			)
+		);
+		$this->set_search_text( $protected, 'A tabby cat asleep on a windowsill. cat, tabby' );
+
+		wp_set_current_user( 0 );
+
+		// Opt the front end in, which is where a logged out search happens.
+		add_filter( 'ai_media_search_is_attachment_search', '__return_true' );
+
+		$this->assertSame( array(), $this->search_media( 'cat' ) );
+	}
+
+	/**
+	 * Excluding a term still excludes, over REST as well as in the admin.
+	 *
+	 * Covers the exclusion behaviour from #6 and the REST gating from #7 in one
+	 * pass, so the rework of the search clause cannot quietly undo either.
+	 *
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/6
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/7
+	 *
+	 * @covers ::ai_media_search_filter_posts_search
+	 */
+	public function test_rest_media_search_applies_exclusions() {
+		$cat = $this->create_image_attachment( array( 'post_title' => 'IMG_0001' ) );
+		$this->set_search_text( $cat, 'A tabby cat asleep on a windowsill. cat, tabby' );
+
+		$dog = $this->create_image_attachment( array( 'post_title' => 'IMG_0002' ) );
+		$this->set_search_text( $dog, 'A dog running on a path. dog, running' );
+
+		$unprocessed = $this->create_image_attachment( array( 'post_title' => 'IMG_0003' ) );
+
+		wp_set_current_user( self::$author_id );
+
+		$this->assertSame(
+			$this->sorted( array( $dog, $unprocessed ) ),
+			$this->sorted( $this->search_media_rest( '-cat' ) )
+		);
 	}
 
 	/**
