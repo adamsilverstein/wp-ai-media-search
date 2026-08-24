@@ -18,6 +18,16 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
+/**
+ * Absolute path to the main plugin file, for building asset URLs.
+ */
+define( 'AI_MEDIA_SEARCH_PLUGIN_FILE', __FILE__ );
+
+/**
+ * Plugin version, used to cache-bust enqueued assets.
+ */
+define( 'AI_MEDIA_SEARCH_VERSION', '0.1.0' );
+
 // Load plugin components.
 require_once __DIR__ . '/includes/ai-generation.php';
 require_once __DIR__ . '/includes/processing.php';
