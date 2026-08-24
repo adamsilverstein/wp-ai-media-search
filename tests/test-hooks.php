@@ -383,4 +383,169 @@ class Test_AI_Media_Search_Hooks extends AI_Media_Search_TestCase {
 		$this->assertSame( '', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
 		$this->assertFalse( wp_next_scheduled( 'ai_media_search_process_single', array( $attachment_id ) ) );
 	}
+
+	/**
+	 * Every image in a post gets its own slot rather than one shared tick.
+	 *
+	 * @covers ::ai_media_search_on_publish
+	 * @covers ::ai_media_search_get_queue_stagger
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/12
+	 */
+	public function test_publishing_staggers_the_images_it_queues() {
+		$ids = array(
+			$this->create_image_attachment(),
+			$this->create_image_attachment(),
+			$this->create_image_attachment(),
+		);
+
+		$post_id = self::factory()->post->create(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => $this->content_for( $ids ),
+			)
+		);
+
+		wp_publish_post( $post_id );
+
+		$timestamps = $this->scheduled_times( $ids );
+
+		$this->assertSame( $timestamps, array_unique( $timestamps ), 'Two images must never share a tick.' );
+		$this->assertEqualsWithDelta( 30, $timestamps[1] - $timestamps[0], 1 );
+		$this->assertEqualsWithDelta( 30, $timestamps[2] - $timestamps[1], 1 );
+	}
+
+	/**
+	 * Sites can widen the spacing to suit a slow AI provider.
+	 *
+	 * @covers ::ai_media_search_on_publish
+	 * @covers ::ai_media_search_get_queue_stagger
+	 */
+	public function test_queue_stagger_is_filterable() {
+		add_filter( 'ai_media_search_queue_stagger', static fn () => 120 );
+
+		$ids = array(
+			$this->create_image_attachment(),
+			$this->create_image_attachment(),
+		);
+
+		$post_id = self::factory()->post->create(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => $this->content_for( $ids ),
+			)
+		);
+
+		wp_publish_post( $post_id );
+
+		$timestamps = $this->scheduled_times( $ids );
+
+		$this->assertEqualsWithDelta( 120, $timestamps[1] - $timestamps[0], 1 );
+	}
+
+	/**
+	 * A spacing of zero restores the old all-at-once behaviour.
+	 *
+	 * @covers ::ai_media_search_on_publish
+	 * @covers ::ai_media_search_get_queue_stagger
+	 */
+	public function test_queue_stagger_can_be_turned_off() {
+		add_filter( 'ai_media_search_queue_stagger', static fn () => 0 );
+
+		$ids = array(
+			$this->create_image_attachment(),
+			$this->create_image_attachment(),
+		);
+
+		$post_id = self::factory()->post->create(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => $this->content_for( $ids ),
+			)
+		);
+
+		wp_publish_post( $post_id );
+
+		$timestamps = $this->scheduled_times( $ids );
+
+		$this->assertSame( $timestamps[0], $timestamps[1] );
+	}
+
+	/**
+	 * A nonsense spacing is clamped rather than trusted.
+	 *
+	 * @covers ::ai_media_search_get_queue_stagger
+	 */
+	public function test_queue_stagger_is_never_negative() {
+		add_filter( 'ai_media_search_queue_stagger', static fn () => -30 );
+
+		$this->assertSame( 0, ai_media_search_get_queue_stagger() );
+	}
+
+	/**
+	 * Images that are passed over do not leave gaps in the schedule.
+	 *
+	 * @covers ::ai_media_search_on_publish
+	 */
+	public function test_stagger_only_counts_the_images_it_queues() {
+		$skipped = $this->create_image_attachment();
+		update_post_meta( $skipped, '_wp_ai_media_search_status', 'skipped' );
+
+		$ids = array(
+			$this->create_image_attachment(),
+			$this->create_image_attachment(),
+		);
+
+		$post_id = self::factory()->post->create(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => $this->content_for( array_merge( array( $skipped ), $ids ) ),
+			)
+		);
+
+		$published_at = time();
+
+		wp_publish_post( $post_id );
+
+		$timestamps = $this->scheduled_times( $ids );
+
+		$this->assertFalse( wp_next_scheduled( 'ai_media_search_process_single', array( $skipped ) ) );
+		$this->assertEqualsWithDelta( $published_at + 5, $timestamps[0], 2, 'The first image queued keeps the short delay.' );
+		$this->assertEqualsWithDelta( 30, $timestamps[1] - $timestamps[0], 1 );
+	}
+
+	/**
+	 * Build post content referencing each of the given attachments.
+	 *
+	 * @param int[] $ids Attachment IDs.
+	 * @return string Post content.
+	 */
+	private function content_for( $ids ) {
+		$content = '';
+
+		foreach ( $ids as $id ) {
+			$content .= '<img class="wp-image-' . $id . '" src="x.jpg" />';
+		}
+
+		return $content;
+	}
+
+	/**
+	 * Get the scheduled run time for each attachment, failing if one is missing.
+	 *
+	 * @param int[] $ids Attachment IDs.
+	 * @return int[] Scheduled timestamps, in the order the IDs were given.
+	 */
+	private function scheduled_times( $ids ) {
+		$timestamps = array();
+
+		foreach ( $ids as $id ) {
+			$next = wp_next_scheduled( 'ai_media_search_process_single', array( $id ) );
+
+			$this->assertNotFalse( $next, "Attachment {$id} was never queued." );
+
+			$timestamps[] = $next;
+		}
+
+		return $timestamps;
+	}
 }
