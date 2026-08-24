@@ -1,0 +1,26 @@
+name: Update WordPress.org assets and readme
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'readme.txt'
+      - '.wordpress-org/**'
+
+jobs:
+  trunk:
+    name: Push to trunk
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Update assets and readme
+        uses: 10up/action-wordpress-plugin-asset-update@stable
+        env:
+          SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
+          # The action defaults to the repository name (wp-ai-media-search),
+          # which is not the plugin slug.
+          SLUG: ai-media-search
