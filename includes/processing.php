@@ -396,6 +396,37 @@ function ai_media_search_reset( $attachment_id ) {
 }
 
 /**
+ * Clear an attachment's AI metadata and process it again immediately.
+ *
+ * Regeneration is the one path where the stored state is deliberately thrown
+ * away: `ai_media_search_process_single()` refuses anything already complete or
+ * skipped, so the reset is what makes the attachment eligible again. The two
+ * steps live together here so every caller resets and reprocesses in the same
+ * order, and so a caller cannot leave an attachment wiped but unprocessed.
+ *
+ * @param int $attachment_id Attachment post ID.
+ */
+function ai_media_search_regenerate_attachment( $attachment_id ) {
+	ai_media_search_reset( $attachment_id );
+	ai_media_search_process_single( $attachment_id );
+
+	/**
+	 * Fires after an attachment has been regenerated on request.
+	 *
+	 * Unlike `ai_media_search_processed`, this fires whether the run succeeded
+	 * or failed, so it is the hook to use for auditing manual retries.
+	 *
+	 * @param int    $attachment_id Attachment post ID.
+	 * @param string $status        Resulting status meta value.
+	 */
+	do_action(
+		'ai_media_search_regenerated',
+		$attachment_id,
+		(string) get_post_meta( $attachment_id, '_wp_ai_media_search_status', true )
+	);
+}
+
+/**
  * Handle a processing failure with retry tracking.
  *
  * @param int      $attachment_id Attachment post ID.
@@ -642,15 +673,105 @@ function ai_media_search_batch_process() {
 }
 
 /**
+ * Name of the transient holding the cached status counts.
+ *
+ * A transient rather than a plain object cache entry: the counts are worth
+ * keeping between requests, and where a persistent object cache is installed
+ * the transient API already stores them there instead of in the options table.
+ */
+const AI_MEDIA_SEARCH_STATUS_COUNTS_TRANSIENT = 'ai_media_search_status_counts';
+
+/**
+ * The statuses the plugin tracks, in the order they are reported.
+ *
+ * @return string[] Status names.
+ */
+function ai_media_search_get_tracked_statuses() {
+	return array( 'complete', 'processing', 'pending', 'failed', 'skipped' );
+}
+
+/**
+ * Get how long cached status counts are served before being recounted.
+ *
+ * Writes made through the plugin drop the cache as they happen, so this is a
+ * backstop for the changes it cannot see: attachments deleted, statuses written
+ * by something other than the post meta API, rows edited straight in the
+ * database. Short enough that such a figure is never misleading for long.
+ *
+ * @return int Lifetime in seconds. Zero or less disables the cache entirely.
+ */
+function ai_media_search_get_status_counts_ttl() {
+	/**
+	 * Filters how long the processing status counts are cached.
+	 *
+	 * Return zero or less to recount on every call, at the cost of two queries
+	 * per admin page load and per hit to the status endpoint.
+	 *
+	 * @param int $ttl Cache lifetime in seconds. Default 5 minutes.
+	 */
+	return (int) apply_filters( 'ai_media_search_status_counts_ttl', 5 * MINUTE_IN_SECONDS );
+}
+
+/**
+ * Discard the cached status counts.
+ */
+function ai_media_search_flush_status_counts() {
+	delete_transient( AI_MEDIA_SEARCH_STATUS_COUNTS_TRANSIENT );
+}
+
+/**
+ * Discard the cached counts whenever a processing status is written.
+ *
+ * Hooking the meta API rather than each individual write catches every caller
+ * at once - processing runs, the upload and publish hooks, WP-CLI, and anything
+ * a site adds of its own - so the admin never reports a figure that a status
+ * change has already made wrong.
+ *
+ * @param int|int[] $meta_id   Meta ID, or IDs on delete. Unused.
+ * @param int       $object_id Attachment post ID. Unused.
+ * @param string    $meta_key  Meta key that changed.
+ */
+function ai_media_search_flush_status_counts_on_meta_change( $meta_id, $object_id, $meta_key ) {
+	unset( $meta_id, $object_id );
+
+	if ( '_wp_ai_media_search_status' === $meta_key ) {
+		ai_media_search_flush_status_counts();
+	}
+}
+add_action( 'added_post_meta', 'ai_media_search_flush_status_counts_on_meta_change', 10, 3 );
+add_action( 'updated_post_meta', 'ai_media_search_flush_status_counts_on_meta_change', 10, 3 );
+add_action( 'deleted_post_meta', 'ai_media_search_flush_status_counts_on_meta_change', 10, 3 );
+
+/**
  * Get processing status counts for all images.
  *
- * @return array Associative array of status => count.
+ * Two queries: one for the library total, one grouped count covering every
+ * status at once. The result is cached, since both the settings screen and the
+ * status endpoint ask for it repeatedly and it changes only as slowly as
+ * processing runs.
+ *
+ * @return array<string, int> Associative array of status => count. Always
+ *                            carries every tracked status, plus `unprocessed`
+ *                            and `total`.
  */
 function ai_media_search_get_status_counts() {
 	global $wpdb;
 
+	$mime_types = ai_media_search_get_supported_mime_types();
+	$ttl        = ai_media_search_get_status_counts_ttl();
+
+	if ( $ttl > 0 ) {
+		$cached = get_transient( AI_MEDIA_SEARCH_STATUS_COUNTS_TRANSIENT );
+
+		// The supported types are filterable, and they decide what gets counted.
+		// A payload built under a different set of types answers a different
+		// question, so it is recounted rather than returned.
+		if ( isset( $cached['mime_types'], $cached['counts'] ) && $cached['mime_types'] === $mime_types ) {
+			return $cached['counts'];
+		}
+	}
+
 	// Build MIME type WHERE clause from supported types.
-	$mime_types  = ai_media_search_get_supported_mime_types();
 	$mime_wheres = array();
 
 	foreach ( $mime_types as $type ) {
@@ -660,33 +781,48 @@ function ai_media_search_get_status_counts() {
 	$mime_clause = '(' . implode( ' OR ', $mime_wheres ) . ')';
 
 	// $mime_clause is assembled above entirely from $wpdb->prepare() output, so
-	// it is already safe to interpolate. Counts are live figures shown in the
-	// admin and over REST, so they are deliberately not cached.
-	// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+	// it is already safe to interpolate. Both results are cached in the
+	// transient written at the end of this function.
+	// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 	$total = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = 'attachment' AND post_status = 'inherit' AND {$mime_clause}" );
 
-	$statuses = array( 'complete', 'processing', 'pending', 'failed', 'skipped' );
-	$counts   = array();
+	$rows = $wpdb->get_results(
+		"SELECT pm.meta_value AS status, COUNT(*) AS num FROM {$wpdb->posts} p
+		INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id AND pm.meta_key = '_wp_ai_media_search_status'
+		WHERE p.post_type = 'attachment' AND p.post_status = 'inherit' AND {$mime_clause}
+		GROUP BY pm.meta_value",
+		ARRAY_A
+	);
+	// phpcs:enable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 
-	foreach ( $statuses as $status ) {
-		// See the note above; $mime_clause is prepared and the counts are
-		// intentionally uncached. The disable/enable pair is needed because the
-		// interpolation falls on a continuation line of the SQL string.
-		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
-		$counts[ $status ] = (int) $wpdb->get_var(
-			$wpdb->prepare(
-				"SELECT COUNT(*) FROM {$wpdb->posts} p
-				INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id AND pm.meta_key = '_wp_ai_media_search_status'
-				WHERE p.post_type = 'attachment' AND p.post_status = 'inherit' AND {$mime_clause} AND pm.meta_value = %s",
-				$status
-			)
-		);
-		// phpcs:enable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+	// GROUP BY returns nothing at all for a status no attachment is in, and
+	// every caller indexes these keys directly. Starting from a full set of
+	// zeroes is what keeps a quiet status present rather than missing.
+	$counts = array_fill_keys( ai_media_search_get_tracked_statuses(), 0 );
+
+	foreach ( (array) $rows as $row ) {
+		$status = (string) $row['status'];
+
+		// A status the plugin does not track is left out of the tally, so it
+		// falls through into `unprocessed` the way it always has.
+		if ( isset( $counts[ $status ] ) ) {
+			$counts[ $status ] = (int) $row['num'];
+		}
 	}
 
-	$tracked               = array_sum( $counts );
-	$counts['unprocessed'] = $total - $tracked;
+	$counts['unprocessed'] = $total - array_sum( $counts );
 	$counts['total']       = $total;
+
+	if ( $ttl > 0 ) {
+		set_transient(
+			AI_MEDIA_SEARCH_STATUS_COUNTS_TRANSIENT,
+			array(
+				'mime_types' => $mime_types,
+				'counts'     => $counts,
+			),
+			$ttl
+		);
+	}
 
 	return $counts;
 }
