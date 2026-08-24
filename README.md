@@ -9,7 +9,7 @@ Upload an image of a cat, and later search your media library for "cat" — even
 1. **New uploads** are queued for AI processing automatically (via a short-delay cron event).
 2. **Existing images** are processed in the background by an hourly cron job, newest first.
 3. **Published posts** trigger processing for any unprocessed images in their content.
-4. The AI analyzes each image and generates a text description plus search tags.
+4. The AI analyzes a scaled copy of each image (the `large` size by default, not the full size original) and generates a text description plus search tags.
 5. The description and tags are stored as post meta and included in media library search queries.
 
 The plugin never overwrites user-entered metadata (title, caption, description, alt text). All AI data is stored in separate `_wp_ai_media_search_*` meta keys.
@@ -75,6 +75,7 @@ Returns processing counts. Requires `upload_files` capability.
 | `ai_media_search_batch_size` | `5` | Images per cron batch (clamped 1–50). |
 | `ai_media_search_prompt` | *(built-in)* | AI prompt text. Receives `$prompt, $attachment_id`. |
 | `ai_media_search_pre_prompt_image` | `null` | Return a JSON string or `WP_Error` to skip the AI request entirely. Receives `$response, $prompt, $file_path, $mime_type, $attachment_id`. |
+| `ai_media_search_image_size` | `'large'` | Registered image size sent to the AI. Use `'full'` to send the original. Receives `$size, $attachment_id`. |
 | `ai_media_search_should_process` | `true` | Skip specific attachments. Receives `$should, $attachment_id`. |
 | `ai_media_search_max_retries` | `3` | Max retry attempts before marking as skipped. |
 | `ai_media_search_update_alt_text` | `false` | When true, writes AI description to empty alt text fields. |
@@ -93,6 +94,11 @@ add_filter( 'ai_media_search_batch_size', function () {
 
 // Enable auto-populating empty alt text.
 add_filter( 'ai_media_search_update_alt_text', '__return_true' );
+
+// Send a smaller image: cheaper and faster, with less detail for the AI to read.
+add_filter( 'ai_media_search_image_size', function () {
+    return 'medium_large';
+} );
 
 // Skip GIFs.
 add_filter( 'ai_media_search_should_process', function ( $should, $attachment_id ) {
