@@ -186,6 +186,21 @@ supply a canned response gets a `WP_Error` rather than a live request.
 
 GitHub Actions runs the suite on PHP 8.1 through 8.4 for every pull request.
 
+### Releasing
+
+Publishing a GitHub release pushes the plugin to the WordPress.org directory
+under the slug `ai-media-search`, which is not the same as this repository's
+name. Before tagging a release, three things have to agree:
+
+1. `Version` in `ai-media-search.php` - this is what the directory shows as the
+   downloadable version.
+2. `Stable tag` in `readme.txt` - this is what the directory serves. If it points
+   at a tag that does not exist, updates break.
+3. The new `== Changelog ==` entry in `readme.txt`.
+
+`Requires at least` and `Requires PHP` are read from `ai-media-search.php`, not
+from `readme.txt`, but the two are kept in sync so the readme is not misleading.
+
 ## Uninstall
 
 Deactivating the plugin stops processing and search integration but preserves all generated metadata. Deleting the plugin removes all `_wp_ai_media_search_*` meta from the database.
