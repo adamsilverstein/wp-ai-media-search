@@ -104,15 +104,18 @@ abstract class AI_Media_Search_TestCase extends WP_UnitTestCase {
 	 * sets up whatever state it is actually about. Queueing on upload is covered
 	 * directly in the hooks tests.
 	 *
-	 * @param array $args Optional. Extra arguments for the attachment factory.
+	 * @param array  $args   Optional. Extra arguments for the attachment factory.
+	 * @param string $source Optional. File name inside the test data images
+	 *                       directory. Default 'canola.jpg', which at 640x480
+	 *                       is too small for an intermediate `large` size.
 	 * @return int Attachment ID.
 	 */
-	protected function create_image_attachment( $args = array() ) {
+	protected function create_image_attachment( $args = array(), $source = 'canola.jpg' ) {
 		$upload_dir = wp_upload_dir();
 		$file       = $upload_dir['path'] . '/ai-media-search-' . wp_generate_password( 8, false ) . '.jpg';
 
 		wp_mkdir_p( dirname( $file ) );
-		copy( DIR_TESTDATA . '/images/canola.jpg', $file );
+		copy( DIR_TESTDATA . '/images/' . $source, $file );
 
 		$attachment_id = self::factory()->attachment->create_object(
 			array_merge(
@@ -129,6 +132,31 @@ abstract class AI_Media_Search_TestCase extends WP_UnitTestCase {
 
 		ai_media_search_reset( $attachment_id );
 		wp_clear_scheduled_hook( 'ai_media_search_process_single', array( $attachment_id ) );
+
+		return $attachment_id;
+	}
+
+	/**
+	 * Create an image attachment and generate its intermediate sizes.
+	 *
+	 * The plain factory stores no attachment metadata, so no intermediate size
+	 * exists. Anything covering which file is sent to the AI needs the real
+	 * sub-sizes on disk, which means running them through WordPress.
+	 *
+	 * @param string $source Optional. File name inside the test data images
+	 *                       directory. Default 'test-image-large.jpg', at 3000x2250.
+	 * @param array  $args   Optional. Extra arguments for the attachment factory.
+	 * @return int Attachment ID.
+	 */
+	protected function create_image_attachment_with_sizes( $source = 'test-image-large.jpg', $args = array() ) {
+		require_once ABSPATH . 'wp-admin/includes/image.php';
+
+		$attachment_id = $this->create_image_attachment( $args, $source );
+
+		wp_update_attachment_metadata(
+			$attachment_id,
+			wp_generate_attachment_metadata( $attachment_id, get_attached_file( $attachment_id ) )
+		);
 
 		return $attachment_id;
 	}
