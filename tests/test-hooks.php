@@ -258,14 +258,129 @@ class Test_AI_Media_Search_Hooks extends AI_Media_Search_TestCase {
 	}
 
 	/**
-	 * Publishing a post should queue its featured image too.
+	 * Publishing a post queues its featured image, even when the content has none.
 	 *
-	 * Skipped: only `post_content` is parsed today, so a post whose only image is
-	 * the featured image queues nothing. That is issue #9.
-	 *
-	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/9
+	 * @covers ::ai_media_search_on_publish
 	 */
 	public function test_publishing_queues_the_featured_image() {
-		$this->markTestSkipped( 'Featured images are not queued on publish. See issue #9.' );
+		$attachment_id = $this->create_image_attachment();
+
+		$post_id = self::factory()->post->create(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => '<p>Just words.</p>',
+			)
+		);
+		set_post_thumbnail( $post_id, $attachment_id );
+
+		wp_publish_post( $post_id );
+
+		$this->assertSame( 'pending', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+		$this->assertNotFalse( wp_next_scheduled( 'ai_media_search_process_single', array( $attachment_id ) ) );
+	}
+
+	/**
+	 * A featured image that is also in the content is only queued once.
+	 *
+	 * @covers ::ai_media_search_on_publish
+	 */
+	public function test_featured_image_in_content_is_queued_once() {
+		$attachment_id = $this->create_image_attachment();
+
+		$post_id = self::factory()->post->create(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => '<img class="wp-image-' . $attachment_id . '" src="x.jpg" />',
+			)
+		);
+		set_post_thumbnail( $post_id, $attachment_id );
+
+		// `pre_schedule_event` runs before core's own duplicate check, so this
+		// counts every attempt rather than only the ones that stick.
+		$attempts = array();
+
+		add_filter(
+			'pre_schedule_event',
+			static function ( $pre, $event ) use ( &$attempts ) {
+				if ( 'ai_media_search_process_single' === $event->hook ) {
+					$attempts[] = $event->args;
+				}
+
+				return $pre;
+			},
+			10,
+			2
+		);
+
+		wp_publish_post( $post_id );
+
+		$this->assertSame( array( array( $attachment_id ) ), $attempts );
+	}
+
+	/**
+	 * A featured image gets the same eligibility checks as a content image.
+	 *
+	 * @covers ::ai_media_search_on_publish
+	 */
+	public function test_publishing_does_not_revive_a_skipped_featured_image() {
+		$attachment_id = $this->create_image_attachment();
+		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'skipped' );
+
+		$post_id = self::factory()->post->create(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => '<p>Just words.</p>',
+			)
+		);
+		set_post_thumbnail( $post_id, $attachment_id );
+
+		wp_publish_post( $post_id );
+
+		$this->assertSame( 'skipped', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+		$this->assertFalse( wp_next_scheduled( 'ai_media_search_process_single', array( $attachment_id ) ) );
+	}
+
+	/**
+	 * A post without a featured image still queues only its content images.
+	 *
+	 * @covers ::ai_media_search_on_publish
+	 */
+	public function test_publishing_without_a_featured_image_queues_content_only() {
+		$attachment_id = $this->create_image_attachment();
+
+		$post_id = self::factory()->post->create(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => '<img class="wp-image-' . $attachment_id . '" src="x.jpg" />',
+			)
+		);
+
+		$this->assertSame( '', get_post_meta( $post_id, '_thumbnail_id', true ) );
+
+		wp_publish_post( $post_id );
+
+		$this->assertSame( 'pending', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+		$this->assertNotFalse( wp_next_scheduled( 'ai_media_search_process_single', array( $attachment_id ) ) );
+	}
+
+	/**
+	 * A post with no images at all queues nothing.
+	 *
+	 * @covers ::ai_media_search_on_publish
+	 */
+	public function test_publishing_a_post_without_images_queues_nothing() {
+		$attachment_id = $this->create_image_attachment();
+
+		$post_id = self::factory()->post->create(
+			array(
+				'post_status'  => 'draft',
+				'post_content' => '<p>Just words.</p>',
+			)
+		);
+
+		wp_publish_post( $post_id );
+
+		$this->assertSame( '', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+		$this->assertFalse( wp_next_scheduled( 'ai_media_search_process_single', array( $attachment_id ) ) );
 	}
 }
