@@ -1,0 +1,59 @@
+<?xml version="1.0"?>
+<ruleset name="AI Media Search">
+	<description>Coding standards for the AI Media Search plugin.</description>
+
+	<!-- What to scan. -->
+	<file>.</file>
+
+	<exclude-pattern>/vendor/*</exclude-pattern>
+	<exclude-pattern>/node_modules/*</exclude-pattern>
+
+	<!-- Show sniff codes and progress, and use colors when available. -->
+	<arg value="ps"/>
+	<arg name="colors"/>
+	<arg name="extensions" value="php"/>
+	<arg name="basepath" value="."/>
+	<arg name="parallel" value="8"/>
+
+	<!-- WordPress Coding Standards. -->
+	<rule ref="WordPress">
+		<!-- Composer is a dev-only dependency, so the plugin ships no autoloader
+			 and files are loaded with require_once from the main plugin file. -->
+		<exclude name="WordPress.Files.FileName.InvalidClassFileName"/>
+	</rule>
+
+	<!-- Minimum supported WordPress version, for the deprecation sniffs. -->
+	<config name="minimum_wp_version" value="7.0"/>
+
+	<rule ref="WordPress.WP.I18n">
+		<properties>
+			<property name="text_domain" type="array">
+				<element value="ai-media-search"/>
+			</property>
+		</properties>
+	</rule>
+
+	<rule ref="WordPress.NamingConventions.PrefixAllGlobals">
+		<properties>
+			<property name="prefixes" type="array">
+				<element value="ai_media_search"/>
+				<element value="AI_Media_Search"/>
+			</property>
+		</properties>
+		<!-- Test bootstrap and test case classes are not plugin globals.
+			 The tests/ directory is added separately in #14. -->
+		<exclude-pattern>/tests/*</exclude-pattern>
+	</rule>
+
+	<!-- PHP cross-version compatibility, matching the Requires PHP header. -->
+	<config name="testVersion" value="8.1-"/>
+	<rule ref="PHPCompatibilityWP"/>
+
+	<!-- Rules that do not apply to test code. -->
+	<rule ref="WordPress.Files.FileName">
+		<exclude-pattern>/tests/*</exclude-pattern>
+	</rule>
+	<rule ref="WordPress.PHP.DevelopmentFunctions">
+		<exclude-pattern>/tests/*</exclude-pattern>
+	</rule>
+</ruleset>

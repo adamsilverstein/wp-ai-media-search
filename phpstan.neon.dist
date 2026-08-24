@@ -1,0 +1,23 @@
+includes:
+	- vendor/szepeviktor/phpstan-wordpress/extension.neon
+
+parameters:
+	level: 5
+	phpVersion: 80100
+	paths:
+		- ai-media-search.php
+		- includes
+		- uninstall.php
+	scanFiles:
+		# WP-CLI is optional at runtime and is not covered by the WordPress stubs.
+		- vendor/php-stubs/wp-cli-stubs/wp-cli-stubs.php
+		- vendor/php-stubs/wp-cli-stubs/wp-cli-commands-stubs.php
+		- vendor/php-stubs/wp-cli-stubs/wp-cli-tools-stubs.php
+	ignoreErrors:
+		# The WordPress 7.0 AI Client API is not yet present in php-stubs/wordpress-stubs.
+		# Calls are already gated behind wp_supports_ai(), so this is safe to ignore
+		# until a stubs release ships the function.
+		-
+			identifier: function.notFound
+			message: '#^Function wp_ai_client_prompt not found\.$#'
+			path: includes/ai-generation.php

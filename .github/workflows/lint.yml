@@ -1,0 +1,57 @@
+name: Lint
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  phpcs:
+    name: Coding standards
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          # Lowest supported version, matching the Requires PHP header.
+          php-version: '8.1'
+          coverage: none
+          tools: composer
+
+      - name: Install dependencies
+        uses: ramsey/composer-install@v3
+
+      - name: Run PHPCS
+        run: composer lint
+
+  phpstan:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          coverage: none
+          tools: composer
+
+      - name: Install dependencies
+        uses: ramsey/composer-install@v3
+
+      - name: Run PHPStan
+        run: composer analyze

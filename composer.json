@@ -1,0 +1,27 @@
+{
+	"name": "adamsilverstein/wp-ai-media-search",
+	"description": "Uses WordPress AI to generate searchable descriptions for media library images.",
+	"type": "wordpress-plugin",
+	"license": "GPL-2.0-or-later",
+	"require": {
+		"php": ">=8.1"
+	},
+	"require-dev": {
+		"dealerdirect/phpcodesniffer-composer-installer": "^1.0",
+		"phpcompatibility/phpcompatibility-wp": "^2.1",
+		"phpstan/phpstan": "^2.1",
+		"szepeviktor/phpstan-wordpress": "^2.0",
+		"php-stubs/wp-cli-stubs": "^2.10",
+		"wp-coding-standards/wpcs": "^3.1"
+	},
+	"config": {
+		"allow-plugins": {
+			"dealerdirect/phpcodesniffer-composer-installer": true
+		}
+	},
+	"scripts": {
+		"lint": "phpcs",
+		"lint:fix": "phpcbf",
+		"analyze": "phpstan analyse --memory-limit=1G"
+	}
+}

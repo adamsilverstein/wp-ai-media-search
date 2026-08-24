@@ -12,3 +12,9 @@
 .env
 .DS_Store
 README.md
+
+# Development tooling: not needed in the WordPress.org build.
+composer.json
+composer.lock
+phpcs.xml.dist
+phpstan.neon.dist
