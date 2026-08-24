@@ -18,3 +18,7 @@ Thumbs.db
 
 # Environment
 .env
+
+# Testing
+.phpunit.result.cache
+phpunit.xml
