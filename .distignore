@@ -1,0 +1,14 @@
+/.git
+/.github
+/.claude
+/.wordpress-org
+/node_modules
+/vendor
+
+.distignore
+.gitattributes
+.gitignore
+.editorconfig
+.env
+.DS_Store
+README.md
