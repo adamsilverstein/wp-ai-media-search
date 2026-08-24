@@ -2,7 +2,7 @@
 Contributors: adamsilverstein
 Tags: ai, media, media library, search, images
 Requires at least: 7.0
-Tested up to: 7.0
+Tested up to: 7.1
 Requires PHP: 8.1
 Stable tag: 0.1.0
 License: GPLv2 or later
