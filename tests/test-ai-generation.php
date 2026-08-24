@@ -158,7 +158,154 @@ class Test_AI_Media_Search_AI_Generation extends AI_Media_Search_TestCase {
 	}
 
 	/**
+	 * A large upload is sent as an intermediate size, not as the original.
+	 */
+	public function test_large_attachment_sends_an_intermediate_size() {
+		$this->stub_ai_success();
+
+		$attachment_id = $this->create_image_attachment_with_sizes();
+		$original      = get_attached_file( $attachment_id );
+
+		ai_media_search_generate_metadata( $attachment_id );
+
+		$this->assertCount( 1, $this->ai_calls );
+
+		$sent = $this->ai_calls[0]['file_path'];
+
+		$this->assertNotSame( $original, $sent, 'The original should not be sent when a large size exists.' );
+		$this->assertFileExists( $sent );
+		$this->assertStringContainsString( '-1024x', wp_basename( $sent ) );
+		$this->assertLessThan( filesize( $original ), filesize( $sent ), 'The intermediate should be the smaller payload.' );
+	}
+
+	/**
+	 * An upload too small for an intermediate size falls back to the original.
+	 */
+	public function test_small_attachment_falls_back_to_the_original() {
+		$this->stub_ai_success();
+
+		// canola.jpg is 640x480, so WordPress generates no `large` size for it.
+		$attachment_id = $this->create_image_attachment_with_sizes( 'canola.jpg' );
+
+		ai_media_search_generate_metadata( $attachment_id );
+
+		$this->assertCount( 1, $this->ai_calls );
+		$this->assertSame( get_attached_file( $attachment_id ), $this->ai_calls[0]['file_path'] );
+	}
+
+	/**
+	 * The size filter picks which intermediate size is sent.
+	 */
+	public function test_image_size_filter_is_respected() {
+		$this->stub_ai_success();
+
+		add_filter(
+			'ai_media_search_image_size',
+			static function () {
+				return 'thumbnail';
+			}
+		);
+
+		$attachment_id = $this->create_image_attachment_with_sizes();
+
+		ai_media_search_generate_metadata( $attachment_id );
+
+		$this->assertCount( 1, $this->ai_calls );
+		$this->assertStringContainsString( '-150x150', wp_basename( $this->ai_calls[0]['file_path'] ) );
+	}
+
+	/**
+	 * Filtering the size to `full` opts back in to sending the original.
+	 */
+	public function test_full_size_filter_sends_the_original() {
+		$this->stub_ai_success();
+
+		add_filter(
+			'ai_media_search_image_size',
+			static function () {
+				return 'full';
+			}
+		);
+
+		$attachment_id = $this->create_image_attachment_with_sizes();
+
+		ai_media_search_generate_metadata( $attachment_id );
+
+		$this->assertCount( 1, $this->ai_calls );
+		$this->assertSame( get_attached_file( $attachment_id ), $this->ai_calls[0]['file_path'] );
+	}
+
+	/**
+	 * A size that was never generated falls back to the original.
+	 */
+	public function test_unknown_size_falls_back_to_the_original() {
+		$this->stub_ai_success();
+
+		add_filter(
+			'ai_media_search_image_size',
+			static function () {
+				return 'ai-media-search-never-registered';
+			}
+		);
+
+		$attachment_id = $this->create_image_attachment_with_sizes();
+
+		ai_media_search_generate_metadata( $attachment_id );
+
+		$this->assertCount( 1, $this->ai_calls );
+		$this->assertSame( get_attached_file( $attachment_id ), $this->ai_calls[0]['file_path'] );
+	}
+
+	/**
+	 * Non-image attachments have no intermediate sizes, so the original is sent.
+	 */
+	public function test_non_image_attachment_sends_the_original() {
+		$this->stub_ai_success();
+
+		$attachment_id = $this->create_image_attachment( array( 'post_mime_type' => 'video/mp4' ) );
+
+		ai_media_search_generate_metadata( $attachment_id );
+
+		$this->assertCount( 1, $this->ai_calls );
+		$this->assertSame( get_attached_file( $attachment_id ), $this->ai_calls[0]['file_path'] );
+		$this->assertSame( 'video/mp4', $this->ai_calls[0]['mime_type'] );
+	}
+
+	/**
+	 * The MIME type sent describes the file sent, not the original.
+	 *
+	 * WordPress can be told to write sub-sizes in a different format than the
+	 * upload, and the provider is handed whichever format actually went out.
+	 */
+	public function test_mime_type_matches_the_file_sent() {
+		if ( ! wp_image_editor_supports( array( 'mime_type' => 'image/webp' ) ) ) {
+			$this->markTestSkipped( 'The image editor cannot write WebP.' );
+		}
+
+		$this->stub_ai_success();
+
+		add_filter(
+			'image_editor_output_format',
+			static function () {
+				return array( 'image/jpeg' => 'image/webp' );
+			}
+		);
+
+		$attachment_id = $this->create_image_attachment_with_sizes();
+
+		ai_media_search_generate_metadata( $attachment_id );
+
+		$this->assertCount( 1, $this->ai_calls );
+		$this->assertSame( 'image/jpeg', get_post_mime_type( $attachment_id ), 'The original is still a JPEG.' );
+		$this->assertSame( 'image/webp', $this->ai_calls[0]['mime_type'] );
+		$this->assertStringEndsWith( '.webp', $this->ai_calls[0]['file_path'] );
+	}
+
+	/**
 	 * The wrapper hands the AI the attachment file and its MIME type.
+	 *
+	 * The factory stores no attachment metadata, so there is no intermediate
+	 * size to prefer and the original is what goes out.
 	 */
 	public function test_wrapper_receives_the_attachment_file() {
 		$this->stub_ai_success();
