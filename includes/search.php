@@ -64,7 +64,9 @@ function ai_media_search_filter_posts_join( $join, $query ) {
  * Add AI search meta to the search WHERE clause.
  *
  * For each search term, adds an OR condition matching against the AI-generated
- * search text. Mirrors the pattern in WP_Query::parse_search().
+ * search text. Mirrors the pattern in WP_Query::parse_search(). An excluded
+ * term instead adds an AND condition ruling out images whose AI-generated text
+ * contains it, leaving images that have no AI metadata in the results.
  *
  * @param string   $search The search WHERE clause.
  * @param WP_Query $query  The query object.
@@ -98,14 +100,31 @@ function ai_media_search_filter_posts_search( $search, $query ) {
 
 		$like = '%' . $wpdb->esc_like( $term ) . '%';
 
-		// Mirror the operator and boolean connector used by core for this term.
+		// Mirror the operator core uses for this term, so the clause core built
+		// can be found in the search string below.
 		$like_op = $exclude ? 'NOT LIKE' : 'LIKE';
-		$joiner  = $exclude ? ' AND ' : ' OR ';
 
-		// $joiner and $like_op are literals chosen above, not user input; only
-		// the LIKE value is interpolated, and that goes through a placeholder.
-		// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-		$meta_clause  = $wpdb->prepare( "{$joiner}(ai_media_search_meta.meta_value {$like_op} %s)", $like );
+		if ( $exclude ) {
+			// The joined column cannot answer an exclusion. It is NULL for an
+			// attachment with no AI metadata, and `NULL NOT LIKE '%term%'` is
+			// NULL rather than true, which would drop every unprocessed image
+			// from the results. It also only carries one metadata row per
+			// result row, so a second row that happens not to match would let
+			// an excluded image back in once the GROUP BY collapsed them.
+			// Asking whether any matching row exists avoids both.
+			// Only the LIKE value varies, and that goes through a placeholder.
+			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			$meta_clause = $wpdb->prepare(
+				" AND NOT EXISTS ( SELECT 1 FROM {$wpdb->postmeta} AS ai_media_search_exclude"
+					. " WHERE ai_media_search_exclude.post_id = {$wpdb->posts}.ID"
+					. " AND ai_media_search_exclude.meta_key = '_wp_ai_media_search_text'"
+					. ' AND ai_media_search_exclude.meta_value LIKE %s )',
+				$like
+			);
+		} else {
+			$meta_clause = $wpdb->prepare( ' OR (ai_media_search_meta.meta_value LIKE %s)', $like );
+		}
+
 		$escaped_like = $wpdb->prepare( '%s', $like );
 		$needle       = "({$wpdb->posts}.post_content {$like_op} {$escaped_like})";
 		$replacement  = $needle . $meta_clause;
