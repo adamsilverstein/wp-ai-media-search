@@ -10,6 +10,9 @@
  *
  * @covers ::ai_media_search_generate_metadata
  * @covers ::ai_media_search_prompt_image
+ * @covers ::ai_media_search_get_language_instruction
+ * @covers ::ai_media_search_get_language
+ * @covers ::ai_media_search_language_from_locale
  */
 class Test_AI_Media_Search_AI_Generation extends AI_Media_Search_TestCase {
 
@@ -154,7 +157,234 @@ class Test_AI_Media_Search_AI_Generation extends AI_Media_Search_TestCase {
 		ai_media_search_generate_metadata( $attachment_id );
 
 		$this->assertCount( 1, $this->ai_calls );
-		$this->assertSame( 'Describe attachment ' . $attachment_id, $this->ai_calls[0]['prompt'] );
+		$this->assertStringStartsWith( 'Describe attachment ' . $attachment_id, $this->ai_calls[0]['prompt'] );
+	}
+
+	/**
+	 * A filtered prompt still gets the language instruction appended.
+	 *
+	 * The whole point of issue #18 is that a non-English site gets non-English
+	 * metadata. A site that customizes the prompt should not lose that.
+	 */
+	public function test_prompt_filter_still_gets_the_language_instruction() {
+		$this->stub_ai_success();
+
+		add_filter(
+			'ai_media_search_prompt',
+			static function () {
+				return 'Describe this image.';
+			}
+		);
+
+		$this->switch_locale( 'de_DE' );
+
+		$attachment_id = $this->create_image_attachment();
+		ai_media_search_generate_metadata( $attachment_id );
+
+		$this->assertCount( 1, $this->ai_calls );
+		$this->assertStringStartsWith( 'Describe this image.', $this->ai_calls[0]['prompt'] );
+		$this->assertStringContainsString( 'in German', $this->ai_calls[0]['prompt'] );
+	}
+
+	/**
+	 * An English site is told to answer in English rather than left to guess.
+	 */
+	public function test_prompt_asks_for_english_on_an_english_site() {
+		$this->stub_ai_success();
+
+		$attachment_id = $this->create_image_attachment();
+		ai_media_search_generate_metadata( $attachment_id );
+
+		$this->assertCount( 1, $this->ai_calls );
+		$this->assertSame( 'en_US', get_locale(), 'The test suite should be running in English.' );
+		$this->assertStringContainsString(
+			'Write the description and the tags in English.',
+			$this->ai_calls[0]['prompt']
+		);
+	}
+
+	/**
+	 * A non-English site asks for the description and tags in its own language.
+	 */
+	public function test_prompt_asks_for_the_site_language() {
+		$this->stub_ai_success();
+
+		$this->switch_locale( 'fr_FR' );
+
+		$attachment_id = $this->create_image_attachment();
+		ai_media_search_generate_metadata( $attachment_id );
+
+		$this->assertCount( 1, $this->ai_calls );
+		$this->assertStringContainsString(
+			'Write the description and the tags in French.',
+			$this->ai_calls[0]['prompt']
+		);
+	}
+
+	/**
+	 * The JSON keys are protected, so parsing survives a localized response.
+	 */
+	public function test_prompt_keeps_the_json_keys_in_english() {
+		$this->stub_ai_success();
+
+		$this->switch_locale( 'ja_JP' );
+
+		$attachment_id = $this->create_image_attachment();
+		ai_media_search_generate_metadata( $attachment_id );
+
+		$this->assertCount( 1, $this->ai_calls );
+
+		$prompt = $this->ai_calls[0]['prompt'];
+
+		$this->assertStringContainsString( 'in Japanese', $prompt );
+		$this->assertStringContainsString( 'Return JSON with keys "description" and "tags"', $prompt );
+		$this->assertStringContainsString(
+			'keys "description" and "tags" in English exactly as written here',
+			$prompt
+		);
+	}
+
+	/**
+	 * A locale with no entry in the table falls back to English.
+	 */
+	public function test_unknown_locale_falls_back_to_english() {
+		$this->stub_ai_success();
+
+		$this->switch_locale( 'xx_YY' );
+
+		$attachment_id = $this->create_image_attachment();
+		ai_media_search_generate_metadata( $attachment_id );
+
+		$this->assertCount( 1, $this->ai_calls );
+		$this->assertStringContainsString(
+			'Write the description and the tags in English.',
+			$this->ai_calls[0]['prompt']
+		);
+		$this->assertStringNotContainsString( 'xx_YY', $this->ai_calls[0]['prompt'] );
+	}
+
+	/**
+	 * The language filter overrides the site locale.
+	 */
+	public function test_language_filter_overrides_the_locale() {
+		$this->stub_ai_success();
+
+		$this->switch_locale( 'de_DE' );
+
+		add_filter(
+			'ai_media_search_language',
+			static function () {
+				return 'Welsh';
+			}
+		);
+
+		$attachment_id = $this->create_image_attachment();
+		ai_media_search_generate_metadata( $attachment_id );
+
+		$this->assertCount( 1, $this->ai_calls );
+		$this->assertStringContainsString(
+			'Write the description and the tags in Welsh.',
+			$this->ai_calls[0]['prompt']
+		);
+	}
+
+	/**
+	 * The language filter receives the locale it is overriding.
+	 */
+	public function test_language_filter_receives_the_locale() {
+		$this->stub_ai_success();
+
+		$this->switch_locale( 'pt_BR' );
+
+		$received = array();
+
+		add_filter(
+			'ai_media_search_language',
+			static function ( $language, $locale, $attachment_id ) use ( &$received ) {
+				$received = array(
+					'language'      => $language,
+					'locale'        => $locale,
+					'attachment_id' => $attachment_id,
+				);
+
+				return $language;
+			},
+			10,
+			3
+		);
+
+		$attachment_id = $this->create_image_attachment();
+		ai_media_search_generate_metadata( $attachment_id );
+
+		$this->assertSame( 'Brazilian Portuguese', $received['language'] );
+		$this->assertSame( 'pt_BR', $received['locale'] );
+		$this->assertSame( $attachment_id, $received['attachment_id'] );
+	}
+
+	/**
+	 * A filter that returns nothing usable falls back to English.
+	 *
+	 * @dataProvider data_unusable_language_values
+	 *
+	 * @param mixed $value Value returned by the language filter.
+	 */
+	public function test_unusable_language_filter_value_falls_back_to_english( $value ) {
+		add_filter(
+			'ai_media_search_language',
+			static function () use ( $value ) {
+				return $value;
+			}
+		);
+
+		$this->assertSame( 'English', ai_media_search_get_language( 0 ) );
+	}
+
+	/**
+	 * Data provider for language filter values that cannot be used in a prompt.
+	 *
+	 * @return array[]
+	 */
+	public function data_unusable_language_values() {
+		return array(
+			'empty string' => array( '' ),
+			'whitespace'   => array( "  \n" ),
+			'null'         => array( null ),
+			'false'        => array( false ),
+		);
+	}
+
+	/**
+	 * Locales map to language names a model can act on.
+	 *
+	 * @dataProvider data_locale_language_names
+	 *
+	 * @param string $locale   WordPress locale.
+	 * @param string $expected Expected language name.
+	 */
+	public function test_locale_maps_to_a_language_name( $locale, $expected ) {
+		$this->assertSame( $expected, ai_media_search_language_from_locale( $locale ) );
+	}
+
+	/**
+	 * Data provider for locale to language name mapping.
+	 *
+	 * @return array[]
+	 */
+	public function data_locale_language_names() {
+		return array(
+			'plain locale'         => array( 'de_DE', 'German' ),
+			'language only'        => array( 'fr', 'French' ),
+			'formal variant'       => array( 'nl_NL_formal', 'Dutch' ),
+			'informal variant'     => array( 'de_CH_informal', 'German' ),
+			'orthography variant'  => array( 'pt_PT_ao90', 'Portuguese' ),
+			'Brazilian Portuguese' => array( 'pt_BR', 'Brazilian Portuguese' ),
+			'simplified Chinese'   => array( 'zh_CN', 'Simplified Chinese' ),
+			'traditional Chinese'  => array( 'zh_TW', 'Traditional Chinese' ),
+			'three letter code'    => array( 'bel', 'Belarusian' ),
+			'BCP 47 style hyphen'  => array( 'ja-JP', 'Japanese' ),
+			'unrecognized locale'  => array( 'xx_YY', 'English' ),
+			'empty locale'         => array( '', 'English' ),
+		);
 	}
 
 	/**

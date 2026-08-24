@@ -11,12 +11,77 @@
 class Test_AI_Media_Search_Search extends AI_Media_Search_TestCase {
 
 	/**
-	 * Leave the admin screen behind between tests.
+	 * A user who can manage the media library.
+	 *
+	 * @var int
+	 */
+	protected static $author_id;
+
+	/**
+	 * A user who cannot.
+	 *
+	 * @var int
+	 */
+	protected static $subscriber_id;
+
+	/**
+	 * Create the users the REST tests dispatch as.
+	 *
+	 * @param WP_UnitTest_Factory $factory Shared fixture factory.
+	 */
+	public static function wpSetUpBeforeClass( $factory ) {
+		self::$author_id     = $factory->user->create( array( 'role' => 'author' ) );
+		self::$subscriber_id = $factory->user->create( array( 'role' => 'subscriber' ) );
+	}
+
+	/**
+	 * Stand up a REST server so the media route can be dispatched.
+	 */
+	public function set_up() {
+		parent::set_up();
+
+		global $wp_rest_server;
+
+		$wp_rest_server = new WP_REST_Server();
+		do_action( 'rest_api_init', $wp_rest_server );
+	}
+
+	/**
+	 * Leave the admin screen and the REST server behind between tests.
 	 */
 	public function tear_down() {
+		global $wp_rest_server;
+
+		$wp_rest_server = null;
+
 		set_current_screen( 'front' );
 
 		parent::tear_down();
+	}
+
+	/**
+	 * Search the media library over the REST route the block editor uses.
+	 *
+	 * @param string $search Search string.
+	 * @return int[] Matched attachment IDs.
+	 */
+	protected function search_media_rest( $search ) {
+		$request = new WP_REST_Request( 'GET', '/wp/v2/media' );
+		$request->set_param( 'search', $search );
+		$request->set_param( 'per_page', 100 );
+		$request->set_param( 'orderby', 'id' );
+		$request->set_param( 'order', 'asc' );
+
+		$response = rest_get_server()->dispatch( $request );
+
+		$this->assertSame( 200, $response->get_status() );
+
+		return array_map(
+			static function ( $item ) {
+				return (int) $item['id'];
+			},
+			$response->get_data()
+		);
 	}
 
 	/**
@@ -65,11 +130,11 @@ class Test_AI_Media_Search_Search extends AI_Media_Search_TestCase {
 	}
 
 	/**
-	 * The filters only run on admin attachment searches.
+	 * A plain front end query is not a media library search.
 	 *
 	 * @covers ::ai_media_search_is_attachment_search
 	 */
-	public function test_is_attachment_search_requires_the_admin() {
+	public function test_is_attachment_search_requires_a_media_library_request() {
 		$query = new WP_Query();
 		$query->parse_query( array( 'post_type' => 'attachment' ) );
 		$query->is_search = true;
@@ -449,14 +514,200 @@ class Test_AI_Media_Search_Search extends AI_Media_Search_TestCase {
 	}
 
 	/**
-	 * The block editor media inserter should find images by AI metadata.
-	 *
-	 * Skipped: the `is_admin()` gate is false during a REST request, so none of
-	 * the filters run there. That is issue #7.
+	 * The block editor media inserter finds images by AI metadata.
 	 *
 	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/7
+	 *
+	 * @covers ::ai_media_search_filter_posts_search
 	 */
 	public function test_rest_media_search_uses_ai_metadata() {
-		$this->markTestSkipped( 'REST attachment searches are not covered by the filters yet. See issue #7.' );
+		$attachment_id = $this->create_image_attachment( array( 'post_title' => 'IMG_4523' ) );
+		$this->set_search_text( $attachment_id, 'A tabby cat asleep on a windowsill. cat, tabby, sleeping' );
+
+		wp_set_current_user( self::$author_id );
+
+		$this->assertSame( array( $attachment_id ), $this->search_media_rest( 'cat' ) );
+	}
+
+	/**
+	 * A visitor with no upload rights gets the stock media search.
+	 *
+	 * `/wp/v2/media` answers unauthenticated requests, and the AI text is not
+	 * public data, so it must not steer results for someone who cannot manage
+	 * the media library.
+	 *
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/7
+	 *
+	 * @covers ::ai_media_search_filter_rest_attachment_query
+	 */
+	public function test_rest_media_search_ignores_ai_metadata_for_visitors() {
+		$attachment_id = $this->create_image_attachment( array( 'post_title' => 'IMG_4523' ) );
+		$this->set_search_text( $attachment_id, 'A tabby cat asleep on a windowsill. cat, tabby, sleeping' );
+
+		wp_set_current_user( 0 );
+
+		$this->assertSame( array(), $this->search_media_rest( 'cat' ) );
+	}
+
+	/**
+	 * A subscriber cannot manage media either, so the AI text stays out of it.
+	 *
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/7
+	 *
+	 * @covers ::ai_media_search_filter_rest_attachment_query
+	 */
+	public function test_rest_media_search_ignores_ai_metadata_for_subscribers() {
+		$attachment_id = $this->create_image_attachment( array( 'post_title' => 'IMG_4523' ) );
+		$this->set_search_text( $attachment_id, 'A tabby cat asleep on a windowsill. cat, tabby, sleeping' );
+
+		wp_set_current_user( self::$subscriber_id );
+
+		$this->assertSame( array(), $this->search_media_rest( 'cat' ) );
+	}
+
+	/**
+	 * Titles still work over REST, and unprocessed images are not dropped.
+	 *
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/7
+	 *
+	 * @covers ::ai_media_search_filter_posts_join
+	 */
+	public function test_rest_media_search_keeps_unprocessed_images() {
+		$processed = $this->create_image_attachment( array( 'post_title' => 'IMG_0001' ) );
+		$this->set_search_text( $processed, 'A tabby cat asleep on a windowsill.' );
+
+		$unprocessed = $this->create_image_attachment( array( 'post_title' => 'A cat photo' ) );
+
+		wp_set_current_user( self::$author_id );
+
+		$this->assertSame(
+			$this->sorted( array( $processed, $unprocessed ) ),
+			$this->sorted( $this->search_media_rest( 'cat' ) )
+		);
+	}
+
+	/**
+	 * A REST search for posts is not an attachment search.
+	 *
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/7
+	 *
+	 * @covers ::ai_media_search_filter_rest_attachment_query
+	 */
+	public function test_rest_post_search_is_untouched() {
+		$attachment_id = $this->create_image_attachment( array( 'post_title' => 'IMG_4523' ) );
+		$this->set_search_text( $attachment_id, 'A tabby cat asleep on a windowsill.' );
+
+		wp_set_current_user( self::$author_id );
+
+		$request = new WP_REST_Request( 'GET', '/wp/v2/posts' );
+		$request->set_param( 'search', 'cat' );
+
+		$response = rest_get_server()->dispatch( $request );
+
+		$this->assertSame( 200, $response->get_status() );
+		$this->assertSame( array(), $response->get_data() );
+	}
+
+	/**
+	 * A front end query is left alone even for a user who can manage media.
+	 *
+	 * The REST flag is what opens the gate, not the capability on its own.
+	 *
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/7
+	 *
+	 * @covers ::ai_media_search_is_attachment_search
+	 */
+	public function test_front_end_search_is_untouched_for_media_managers() {
+		$attachment_id = $this->create_image_attachment( array( 'post_title' => 'IMG_4523' ) );
+		$this->set_search_text( $attachment_id, 'A tabby cat asleep on a windowsill.' );
+
+		wp_set_current_user( self::$author_id );
+
+		$this->assertSame( array(), $this->search_media( 'cat' ) );
+	}
+
+	/**
+	 * A front end post search still runs core's plain search.
+	 *
+	 * @covers ::ai_media_search_is_attachment_search
+	 */
+	public function test_front_end_post_search_is_unaffected() {
+		$post_id = self::factory()->post->create(
+			array(
+				'post_title'   => 'A cat story',
+				'post_content' => 'All about a cat.',
+				'post_status'  => 'publish',
+			)
+		);
+
+		$attachment_id = $this->create_image_attachment( array( 'post_title' => 'IMG_4523' ) );
+		$this->set_search_text( $attachment_id, 'A tabby cat asleep on a windowsill.' );
+
+		wp_set_current_user( self::$author_id );
+
+		$query = new WP_Query(
+			array(
+				'post_type' => 'post',
+				's'         => 'cat',
+				'fields'    => 'ids',
+			)
+		);
+
+		$this->assertSame( array( $post_id ), array_map( 'intval', $query->posts ) );
+	}
+
+	/**
+	 * The gate is filterable, so a site can opt the front end in.
+	 *
+	 * @covers ::ai_media_search_is_attachment_search
+	 */
+	public function test_is_attachment_search_is_filterable() {
+		$attachment_id = $this->create_image_attachment( array( 'post_title' => 'IMG_4523' ) );
+		$this->set_search_text( $attachment_id, 'A tabby cat asleep on a windowsill.' );
+
+		$this->assertSame( array(), $this->search_media( 'cat' ) );
+
+		add_filter( 'ai_media_search_is_attachment_search', '__return_true' );
+
+		$this->assertSame( array( $attachment_id ), $this->search_media( 'cat' ) );
+	}
+
+	/**
+	 * The filter can also turn the integration off where it would have run.
+	 *
+	 * @covers ::ai_media_search_is_attachment_search
+	 */
+	public function test_is_attachment_search_filter_can_opt_out() {
+		$attachment_id = $this->create_image_attachment( array( 'post_title' => 'IMG_4523' ) );
+		$this->set_search_text( $attachment_id, 'A tabby cat asleep on a windowsill.' );
+
+		$this->go_to_admin();
+
+		add_filter( 'ai_media_search_is_attachment_search', '__return_false' );
+
+		$this->assertSame( array(), $this->search_media( 'cat' ) );
+	}
+
+	/**
+	 * The REST flag is only added for a user who can manage media.
+	 *
+	 * @covers ::ai_media_search_filter_rest_attachment_query
+	 */
+	public function test_rest_attachment_query_is_flagged_by_capability() {
+		$request = new WP_REST_Request( 'GET', '/wp/v2/media' );
+
+		wp_set_current_user( self::$author_id );
+
+		$args = ai_media_search_filter_rest_attachment_query( array( 'post_type' => 'attachment' ), $request );
+
+		$this->assertArrayHasKey( 'ai_media_search_rest', $args );
+		$this->assertTrue( $args['ai_media_search_rest'] );
+
+		wp_set_current_user( self::$subscriber_id );
+
+		$this->assertSame(
+			array( 'post_type' => 'attachment' ),
+			ai_media_search_filter_rest_attachment_query( array( 'post_type' => 'attachment' ), $request )
+		);
 	}
 }
