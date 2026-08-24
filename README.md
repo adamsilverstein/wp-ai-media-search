@@ -14,6 +14,15 @@ Upload an image of a cat, and later search your media library for "cat" — even
 
 The plugin never overwrites user-entered metadata (title, caption, description, alt text). All AI data is stored in separate `_wp_ai_media_search_*` meta keys.
 
+The AI text is searched as an extra source alongside the post columns WordPress
+already searches, one search term at a time, so a two word search can match one
+word in the title and the other in the AI description. It follows the rest of
+`WP_Query`'s search behaviour: `exact` and `sentence` queries match the AI text
+the same way they match a post column, a `post_search_columns` filter that
+narrows the columns still applies to those columns, and a term prefixed with `-`
+excludes images the AI described that way without hiding images that have no AI
+text yet.
+
 ## Requirements
 
 - WordPress 7.0+
