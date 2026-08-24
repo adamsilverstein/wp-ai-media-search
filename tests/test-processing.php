@@ -695,6 +695,192 @@ class Test_AI_Media_Search_Processing extends AI_Media_Search_TestCase {
 	}
 
 	/**
+	 * A status nothing is in still reports a zero rather than going missing.
+	 *
+	 * The grouped count returns no row at all for such a status, and every
+	 * caller reads these keys straight off the array.
+	 *
+	 * @covers ::ai_media_search_get_status_counts
+	 */
+	public function test_status_counts_report_zero_for_unused_statuses() {
+		update_post_meta( $this->create_image_attachment(), '_wp_ai_media_search_status', 'complete' );
+
+		$counts = ai_media_search_get_status_counts();
+
+		foreach ( array( 'complete', 'processing', 'pending', 'failed', 'skipped', 'unprocessed', 'total' ) as $key ) {
+			$this->assertArrayHasKey( $key, $counts );
+			$this->assertIsInt( $counts[ $key ] );
+		}
+
+		$this->assertSame( 1, $counts['complete'] );
+		$this->assertSame( 0, $counts['processing'] );
+		$this->assertSame( 0, $counts['pending'] );
+		$this->assertSame( 0, $counts['failed'] );
+		$this->assertSame( 0, $counts['skipped'] );
+		$this->assertSame( 0, $counts['unprocessed'] );
+		$this->assertSame( 1, $counts['total'] );
+	}
+
+	/**
+	 * A status the plugin does not track counts as unprocessed.
+	 *
+	 * The grouped query returns a row for any value in the meta key, so values
+	 * written by something else have to be discarded rather than tallied.
+	 *
+	 * @covers ::ai_media_search_get_status_counts
+	 */
+	public function test_status_counts_treat_unknown_statuses_as_unprocessed() {
+		update_post_meta( $this->create_image_attachment(), '_wp_ai_media_search_status', 'complete' );
+		update_post_meta( $this->create_image_attachment(), '_wp_ai_media_search_status', 'something-else' );
+
+		$counts = ai_media_search_get_status_counts();
+
+		$this->assertSame( 1, $counts['complete'] );
+		$this->assertSame( 1, $counts['unprocessed'] );
+		$this->assertSame( 2, $counts['total'] );
+	}
+
+	/**
+	 * Counting the whole library takes two queries, not one per status.
+	 *
+	 * Caching is turned off here so the assertion is about the counting itself:
+	 * one grouped query for the five statuses plus one for the library total,
+	 * however many statuses there are and however often it is asked for.
+	 *
+	 * @covers ::ai_media_search_get_status_counts
+	 */
+	public function test_status_counts_take_two_queries() {
+		add_filter( 'ai_media_search_status_counts_ttl', '__return_zero' );
+
+		foreach ( array( 'complete', 'processing', 'pending', 'failed', 'skipped' ) as $status ) {
+			update_post_meta( $this->create_image_attachment(), '_wp_ai_media_search_status', $status );
+		}
+
+		global $wpdb;
+
+		$before = $wpdb->num_queries;
+
+		ai_media_search_get_status_counts();
+
+		$this->assertSame( 2, $wpdb->num_queries - $before );
+
+		// And again, because with the cache off nothing is being reused.
+		$before = $wpdb->num_queries;
+
+		ai_media_search_get_status_counts();
+
+		$this->assertSame( 2, $wpdb->num_queries - $before );
+	}
+
+	/**
+	 * A second call inside the cache lifetime hits no database at all.
+	 *
+	 * @covers ::ai_media_search_get_status_counts
+	 */
+	public function test_status_counts_are_served_from_the_cache() {
+		update_post_meta( $this->create_image_attachment(), '_wp_ai_media_search_status', 'complete' );
+
+		global $wpdb;
+
+		$first = ai_media_search_get_status_counts();
+
+		$before  = $wpdb->num_queries;
+		$second  = ai_media_search_get_status_counts();
+		$queries = $wpdb->num_queries - $before;
+
+		$this->assertSame( 0, $queries );
+		$this->assertSame( $first, $second );
+	}
+
+	/**
+	 * Changing a status drops the cache, so the next call reports the change.
+	 *
+	 * @covers ::ai_media_search_flush_status_counts_on_meta_change
+	 */
+	public function test_status_counts_cache_is_dropped_when_a_status_changes() {
+		$attachment_id = $this->create_image_attachment();
+
+		$this->assertSame( 1, ai_media_search_get_status_counts()['unprocessed'] );
+
+		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'complete' );
+
+		$counts = ai_media_search_get_status_counts();
+
+		$this->assertSame( 1, $counts['complete'] );
+		$this->assertSame( 0, $counts['unprocessed'] );
+	}
+
+	/**
+	 * Clearing an attachment's status drops the cache too.
+	 *
+	 * @covers ::ai_media_search_flush_status_counts_on_meta_change
+	 */
+	public function test_status_counts_cache_is_dropped_when_a_status_is_deleted() {
+		$attachment_id = $this->create_image_attachment();
+		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'complete' );
+
+		$this->assertSame( 1, ai_media_search_get_status_counts()['complete'] );
+
+		ai_media_search_reset( $attachment_id );
+
+		$counts = ai_media_search_get_status_counts();
+
+		$this->assertSame( 0, $counts['complete'] );
+		$this->assertSame( 1, $counts['unprocessed'] );
+	}
+
+	/**
+	 * Processing an attachment refreshes the figure the admin reads.
+	 *
+	 * The whole point of invalidating on write: a run finishes and the next
+	 * page load shows it, rather than waiting out the cache lifetime.
+	 *
+	 * @covers ::ai_media_search_get_status_counts
+	 */
+	public function test_status_counts_reflect_a_completed_run() {
+		$attachment_id = $this->create_image_attachment();
+		$this->stub_ai_success();
+
+		$this->assertSame( 0, ai_media_search_get_status_counts()['complete'] );
+
+		ai_media_search_process_single( $attachment_id );
+
+		$this->assertSame( 'complete', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+		$this->assertSame( 1, ai_media_search_get_status_counts()['complete'] );
+	}
+
+	/**
+	 * Widening the supported types recounts rather than reusing the cache.
+	 *
+	 * The cached figure answers a question about images alone, so it is not an
+	 * answer for a site that has just added video.
+	 *
+	 * @covers ::ai_media_search_get_status_counts
+	 */
+	public function test_status_counts_are_recounted_when_supported_types_change() {
+		$this->create_image_attachment();
+
+		self::factory()->attachment->create_object(
+			array(
+				'file'           => 'clip.mp4',
+				'post_mime_type' => 'video/mp4',
+			)
+		);
+
+		$this->assertSame( 1, ai_media_search_get_status_counts()['total'] );
+
+		add_filter(
+			'ai_media_search_supported_mime_types',
+			static function ( $types ) {
+				$types[] = 'video';
+				return $types;
+			}
+		);
+
+		$this->assertSame( 2, ai_media_search_get_status_counts()['total'] );
+	}
+
+	/**
 	 * Leave an attachment in the state a run that died mid-flight leaves behind.
 	 *
 	 * A worker takes the lock, writes `processing`, and never comes back. Both
