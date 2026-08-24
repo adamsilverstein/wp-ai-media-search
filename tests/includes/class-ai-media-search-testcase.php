@@ -36,7 +36,10 @@ abstract class AI_Media_Search_TestCase extends WP_UnitTestCase {
 	/**
 	 * Fail closed when a test has not stubbed the AI response.
 	 *
-	 * @param null|string|WP_Error $response      Raw response.
+	 * This runs at priority 1, so a stub added later still wins. Recording the
+	 * arguments here means every test can see what the plugin would have sent.
+	 *
+	 * @param null|string|WP_Error $response      Raw response. Always null here.
 	 * @param string               $prompt        The prompt text.
 	 * @param string               $file_path     Path to the file to analyze.
 	 * @param string               $mime_type     MIME type of the file.
@@ -44,9 +47,9 @@ abstract class AI_Media_Search_TestCase extends WP_UnitTestCase {
 	 * @return string|WP_Error
 	 */
 	public function block_ai_request( $response, $prompt, $file_path, $mime_type, $attachment_id ) {
-		$this->ai_calls[] = compact( 'prompt', 'file_path', 'mime_type', 'attachment_id' );
-
 		unset( $response );
+
+		$this->ai_calls[] = compact( 'prompt', 'file_path', 'mime_type', 'attachment_id' );
 
 		return new WP_Error(
 			'ai_media_search_test_unstubbed',
