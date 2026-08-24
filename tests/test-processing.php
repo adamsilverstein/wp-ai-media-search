@@ -695,14 +695,261 @@ class Test_AI_Media_Search_Processing extends AI_Media_Search_TestCase {
 	}
 
 	/**
+	 * Leave an attachment in the state a run that died mid-flight leaves behind.
+	 *
+	 * A worker takes the lock, writes `processing`, and never comes back. Both
+	 * timestamps are backdated so the row looks as old as $age seconds.
+	 *
+	 * @param int  $attachment_id Attachment post ID.
+	 * @param int  $age           Optional. How long ago the run started, in seconds.
+	 * @param bool $track_start   Optional. Whether to record a start time. Rows
+	 *                            stranded before start times were tracked have
+	 *                            nothing but the leaked lock to go on.
+	 */
+	private function strand_in_processing( $attachment_id, $age = 7200, $track_start = true ) {
+		ai_media_search_acquire_lock( $attachment_id );
+		update_option( "ai_media_search_lock_{$attachment_id}", time() - $age );
+
+		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'processing' );
+
+		if ( $track_start ) {
+			update_post_meta( $attachment_id, '_wp_ai_media_search_started', time() - $age );
+		}
+	}
+
+	/**
 	 * A run that dies mid-flight should not strand the attachment.
 	 *
-	 * Skipped: recovering a stale `processing` row is issue #8, and there is no
-	 * behaviour to assert until that lands.
-	 *
+	 * @covers ::ai_media_search_can_process_attachment
+	 * @covers ::ai_media_search_is_stale_processing
+	 * @covers ::ai_media_search_process_single
 	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/8
 	 */
 	public function test_stale_processing_state_is_recovered() {
-		$this->markTestSkipped( 'Stale `processing` recovery is not implemented yet. See issue #8.' );
+		$this->stub_ai_success();
+
+		$attachment_id = $this->create_image_attachment();
+		$this->strand_in_processing( $attachment_id );
+
+		$this->assertTrue( ai_media_search_is_stale_processing( $attachment_id ) );
+		$this->assertTrue( ai_media_search_can_process_attachment( $attachment_id ), 'A stranded run must become eligible again.' );
+
+		ai_media_search_process_single( $attachment_id );
+
+		$this->assertCount( 1, $this->ai_calls, 'The recovered attachment must reach the AI.' );
+		$this->assertSame( 'complete', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+		$this->assertSame( '', get_post_meta( $attachment_id, '_wp_ai_media_search_started', true ), 'A finished run must clear its start time.' );
+		$this->assertFalse( get_option( "ai_media_search_lock_{$attachment_id}" ) );
+	}
+
+	/**
+	 * A run still inside the timeout is left alone.
+	 *
+	 * @covers ::ai_media_search_can_process_attachment
+	 * @covers ::ai_media_search_is_stale_processing
+	 * @covers ::ai_media_search_process_single
+	 */
+	public function test_fresh_processing_state_is_not_reclaimed() {
+		$this->stub_ai_success();
+
+		$attachment_id = $this->create_image_attachment();
+		$this->strand_in_processing( $attachment_id, 30 );
+
+		$this->assertFalse( ai_media_search_is_stale_processing( $attachment_id ) );
+		$this->assertFalse( ai_media_search_can_process_attachment( $attachment_id ) );
+
+		ai_media_search_process_single( $attachment_id );
+
+		$this->assertSame( array(), $this->ai_calls, 'A live run must not be duplicated.' );
+		$this->assertSame( 'processing', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+	}
+
+	/**
+	 * Rows stranded before start times were recorded fall back to the lock.
+	 *
+	 * @covers ::ai_media_search_is_stale_processing
+	 */
+	public function test_stale_processing_falls_back_to_the_lock_timestamp() {
+		$attachment_id = $this->create_image_attachment();
+		$this->strand_in_processing( $attachment_id, 7200, false );
+
+		$this->assertSame( '', get_post_meta( $attachment_id, '_wp_ai_media_search_started', true ) );
+		$this->assertTrue( ai_media_search_is_stale_processing( $attachment_id ) );
+		$this->assertTrue( ai_media_search_can_process_attachment( $attachment_id ) );
+	}
+
+	/**
+	 * With no timestamp anywhere there is nothing to judge age by, so the row
+	 * is left as it is rather than risking a duplicate AI call.
+	 *
+	 * @covers ::ai_media_search_is_stale_processing
+	 */
+	public function test_processing_without_any_timestamp_is_left_alone() {
+		$attachment_id = $this->create_image_attachment();
+		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'processing' );
+
+		$this->assertFalse( ai_media_search_is_stale_processing( $attachment_id ) );
+		$this->assertFalse( ai_media_search_can_process_attachment( $attachment_id ) );
+	}
+
+	/**
+	 * Statuses other than `processing` are never stale.
+	 *
+	 * @covers ::ai_media_search_is_stale_processing
+	 */
+	public function test_only_processing_rows_can_go_stale() {
+		$attachment_id = $this->create_image_attachment();
+		$this->strand_in_processing( $attachment_id );
+		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'complete' );
+
+		$this->assertFalse( ai_media_search_is_stale_processing( $attachment_id ) );
+	}
+
+	/**
+	 * Sites with slower AI calls can widen the window, or narrow it.
+	 *
+	 * @covers ::ai_media_search_get_processing_timeout
+	 * @covers ::ai_media_search_is_stale_processing
+	 */
+	public function test_processing_timeout_is_filterable() {
+		$attachment_id = $this->create_image_attachment();
+		$this->strand_in_processing( $attachment_id, 5 * MINUTE_IN_SECONDS );
+
+		$this->assertFalse( ai_media_search_is_stale_processing( $attachment_id ), 'Five minutes is inside the default window.' );
+
+		add_filter(
+			'ai_media_search_processing_timeout',
+			static function () {
+				return MINUTE_IN_SECONDS;
+			}
+		);
+
+		$this->assertSame( MINUTE_IN_SECONDS, ai_media_search_get_processing_timeout() );
+		$this->assertTrue( ai_media_search_is_stale_processing( $attachment_id ) );
+	}
+
+	/**
+	 * The timeout never drops below a minute, however low a filter sets it.
+	 *
+	 * @covers ::ai_media_search_get_processing_timeout
+	 */
+	public function test_processing_timeout_has_a_floor() {
+		add_filter( 'ai_media_search_processing_timeout', '__return_zero' );
+
+		$this->assertSame( MINUTE_IN_SECONDS, ai_media_search_get_processing_timeout() );
+	}
+
+	/**
+	 * An abandoned lock can be taken over once it ages out.
+	 *
+	 * @covers ::ai_media_search_acquire_lock
+	 */
+	public function test_a_stale_lock_can_be_broken() {
+		$attachment_id = $this->create_image_attachment();
+
+		$this->assertTrue( ai_media_search_acquire_lock( $attachment_id ) );
+		$this->assertFalse( ai_media_search_acquire_lock( $attachment_id ), 'A live lock must hold.' );
+
+		update_option( "ai_media_search_lock_{$attachment_id}", time() - 7200 );
+
+		$this->assertTrue( ai_media_search_acquire_lock( $attachment_id ), 'An abandoned lock must be breakable.' );
+		$this->assertGreaterThan( time() - 60, (int) get_option( "ai_media_search_lock_{$attachment_id}" ), 'Breaking the lock must stamp it afresh.' );
+		$this->assertFalse( ai_media_search_acquire_lock( $attachment_id ), 'The re-taken lock must hold in turn.' );
+	}
+
+	/**
+	 * A lock with no usable timestamp is treated as abandoned.
+	 *
+	 * @covers ::ai_media_search_acquire_lock
+	 */
+	public function test_a_lock_with_no_timestamp_can_be_broken() {
+		$attachment_id = $this->create_image_attachment();
+
+		add_option( "ai_media_search_lock_{$attachment_id}", '', '', false );
+
+		$this->assertTrue( ai_media_search_acquire_lock( $attachment_id ) );
+	}
+
+	/**
+	 * The batch query has to find stranded rows or nothing ever retries them.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 * @covers ::ai_media_search_get_unprocessed_meta_query
+	 */
+	public function test_batch_picks_up_a_stale_processing_row() {
+		$this->stub_ai_success();
+
+		$attachment_id = $this->create_image_attachment();
+		$this->strand_in_processing( $attachment_id );
+
+		ai_media_search_batch_process();
+
+		$this->assertCount( 1, $this->ai_calls );
+		$this->assertSame( 'complete', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+	}
+
+	/**
+	 * The same query finds rows stranded without a recorded start time.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 * @covers ::ai_media_search_get_unprocessed_meta_query
+	 */
+	public function test_batch_picks_up_a_stale_processing_row_with_no_start_time() {
+		$this->stub_ai_success();
+
+		$attachment_id = $this->create_image_attachment();
+		$this->strand_in_processing( $attachment_id, 7200, false );
+
+		ai_media_search_batch_process();
+
+		$this->assertSame( 'complete', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+	}
+
+	/**
+	 * A batch run must not trample a worker that is still going.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 */
+	public function test_batch_leaves_a_live_processing_row_alone() {
+		$this->stub_ai_success();
+
+		$attachment_id = $this->create_image_attachment();
+		$this->strand_in_processing( $attachment_id, 30 );
+
+		ai_media_search_batch_process();
+
+		$this->assertSame( array(), $this->ai_calls );
+		$this->assertSame( 'processing', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+	}
+
+	/**
+	 * A failed run clears its start time along with the lock.
+	 *
+	 * @covers ::ai_media_search_handle_failure
+	 */
+	public function test_a_failed_run_clears_the_start_time() {
+		$this->stub_ai_response( new WP_Error( 'ai_media_search_test', 'Nope.' ) );
+
+		$attachment_id = $this->create_image_attachment();
+
+		ai_media_search_process_single( $attachment_id );
+
+		$this->assertSame( 'failed', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+		$this->assertSame( '', get_post_meta( $attachment_id, '_wp_ai_media_search_started', true ) );
+	}
+
+	/**
+	 * Resetting an attachment wipes the start time too.
+	 *
+	 * @covers ::ai_media_search_reset
+	 */
+	public function test_reset_clears_the_start_time() {
+		$attachment_id = $this->create_image_attachment();
+		$this->strand_in_processing( $attachment_id );
+
+		ai_media_search_reset( $attachment_id );
+
+		$this->assertSame( '', get_post_meta( $attachment_id, '_wp_ai_media_search_started', true ) );
+		$this->assertFalse( get_option( "ai_media_search_lock_{$attachment_id}" ) );
 	}
 }
