@@ -516,6 +516,126 @@ function ai_media_search_get_unprocessed_meta_query() {
 }
 
 /**
+ * Get the wall clock budget a single batch run may spend, in seconds.
+ *
+ * Every item in a batch is a blocking AI request that can take anything from a
+ * couple of seconds to most of a minute, so a batch of five can easily outlive
+ * the request that started it. PHP then kills the run mid-call, which is
+ * exactly what strands an attachment in `processing`.
+ *
+ * The budget is derived from `max_execution_time` and deliberately stops short
+ * of it. Elapsed time is only checked between items, so whichever AI call is
+ * running when the budget runs out still has to come back: the fifth of the
+ * limit held in reserve is what that call gets to finish in. A limit of `0`
+ * means PHP will not stop the script at all, which is the norm under WP-CLI and
+ * on some hosts, so a few minutes is used instead of running indefinitely.
+ *
+ * The budget is spent from the start of the request, not the start of the
+ * batch, because that is how PHP counts. Booting WordPress and running any
+ * other cron events that were due on the same tick come out of it before the
+ * batch gets a look in - see ai_media_search_get_batch_clock_start().
+ *
+ * @return int Budget in seconds. Never negative. Zero means each run processes
+ *             a single attachment, since a run always makes progress.
+ */
+function ai_media_search_get_batch_time_budget() {
+	$max_execution_time = (int) ini_get( 'max_execution_time' );
+
+	if ( $max_execution_time > 0 ) {
+		$budget = (int) floor( $max_execution_time * 0.8 );
+	} else {
+		$budget = 3 * MINUTE_IN_SECONDS;
+	}
+
+	/**
+	 * Filters the wall clock budget for a single batch cron run.
+	 *
+	 * Raise this on hosts that allow long-running requests, or lower it to keep
+	 * cron requests short. The budget is checked between items, so a run can
+	 * overrun it by however long the last AI call takes; leave room for that.
+	 *
+	 * The value covers the whole request, not just the batch: whatever the
+	 * request already spent before the batch started counts against it.
+	 *
+	 * A run always processes at least one attachment, so no value here can stop
+	 * the queue from draining.
+	 *
+	 * @param int $budget             Budget in seconds. Default 80% of
+	 *                                `max_execution_time`, or 3 minutes when
+	 *                                PHP imposes no limit.
+	 * @param int $max_execution_time The `max_execution_time` the default was
+	 *                                derived from. `0` means no limit.
+	 */
+	$budget = (int) apply_filters( 'ai_media_search_batch_time_budget', $budget, $max_execution_time );
+
+	return max( 0, $budget );
+}
+
+/**
+ * Get the moment a batch run's time budget is measured from.
+ *
+ * PHP counts `max_execution_time` from the start of the request, not from the
+ * start of the batch. A cron request runs every event that is due, so by the
+ * time the batch is reached WordPress has booted and any earlier callbacks have
+ * had their turn - and all of that has already come out of the same allowance.
+ * Measuring from the batch's own start would miss every second of it, and a run
+ * given a 24 second budget out of a 30 second limit would happily take all 24
+ * on top of the 10 the request had already spent.
+ *
+ * PHP records the request's start time in `REQUEST_TIME_FLOAT`, but it is not
+ * guaranteed to be there and not guaranteed to make sense: some SAPIs leave it
+ * out, and a value in the future would make the elapsed time negative and stop
+ * the run ever ending. Anything unusable falls back to now, which measures from
+ * the batch instead - no worse than not checking at all.
+ *
+ * @return float Unix timestamp with microseconds.
+ */
+function ai_media_search_get_batch_clock_start() {
+	$now = microtime( true );
+
+	$request_start = isset( $_SERVER['REQUEST_TIME_FLOAT'] ) ? (float) $_SERVER['REQUEST_TIME_FLOAT'] : 0.0;
+
+	// Zero covers both a missing value and anything PHP could not read as a
+	// number, and a start time in the future is a clock problem rather than a
+	// head start - it would make the elapsed time negative.
+	if ( $request_start <= 0.0 || $request_start > $now ) {
+		return $now;
+	}
+
+	return $request_start;
+}
+
+/**
+ * Schedule an extra batch run for work the current run could not reach.
+ *
+ * A run that stops on its time budget leaves the rest of its batch untouched,
+ * and the recurring cron event is an hour away. Queueing a follow-up run lets a
+ * backlog keep draining at whatever pace the site can manage, rather than
+ * clearing one budget's worth of images an hour.
+ *
+ * Relies on the duplicate check in wp_schedule_single_event(), so follow-ups
+ * never stack up behind each other or alongside a batch that is already due.
+ */
+function ai_media_search_schedule_batch_followup() {
+	/**
+	 * Filters the delay before a follow-up batch run.
+	 *
+	 * The follow-up only runs when a batch stops early with work left over.
+	 * Return zero or less to turn follow-up runs off and wait for the next
+	 * recurring batch instead.
+	 *
+	 * @param int $delay Delay in seconds. Default 2 minutes.
+	 */
+	$delay = (int) apply_filters( 'ai_media_search_batch_followup_delay', 2 * MINUTE_IN_SECONDS );
+
+	if ( $delay <= 0 ) {
+		return;
+	}
+
+	wp_schedule_single_event( time() + $delay, 'ai_media_search_batch_process' );
+}
+
+/**
  * Process a batch of unprocessed images. Runs on WP Cron hourly.
  */
 function ai_media_search_batch_process() {
@@ -549,21 +669,45 @@ function ai_media_search_batch_process() {
 		return;
 	}
 
+	$budget    = ai_media_search_get_batch_time_budget();
+	$started   = ai_media_search_get_batch_clock_start();
 	$processed = 0;
 
 	foreach ( $query->posts as $attachment_id ) {
+		// Stop between items, never inside one. An item abandoned part way
+		// through would still hold its lock and still read as `processing`,
+		// and nothing would touch it again until the stale run timeout expired.
+		// Anything this run does not reach is simply left as it was found, so
+		// the next run picks it up from the same query.
+		//
+		// The first item always runs. The budget can be gone before the batch
+		// even starts - a request that spent it elsewhere, or a filter that
+		// returns nothing much - and a run that did no work at all would leave
+		// the queue stuck forever.
+		if ( $processed > 0 && ( microtime( true ) - $started ) >= $budget ) {
+			break;
+		}
+
 		// Eligibility (including retry cooldown) is enforced inside
 		// ai_media_search_process_single() via the shared helper.
 		ai_media_search_process_single( $attachment_id );
 		++$processed;
 	}
 
+	$remaining = count( $query->posts ) - $processed;
+
+	if ( $remaining > 0 ) {
+		ai_media_search_schedule_batch_followup();
+	}
+
 	/**
 	 * Fires after a batch cron run completes.
 	 *
 	 * @param int $processed Number of attachments processed in this batch.
+	 * @param int $remaining Number of attachments the run left for the next one
+	 *                       because its time budget was spent.
 	 */
-	do_action( 'ai_media_search_batch_complete', $processed );
+	do_action( 'ai_media_search_batch_complete', $processed, $remaining );
 }
 
 /**

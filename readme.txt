@@ -23,8 +23,8 @@ The description and tags are written in your site language, so searching in the 
 = How images get processed =
 
 * New uploads are queued at upload time and picked up by a cron event a few seconds later.
-* Images already in the library are worked through by an hourly cron job, newest first, five per run by default.
-* Publishing a post queues any unprocessed images found in its content, including images inside gallery, cover and media-and-text blocks, plus the featured image.
+* Images already in the library are worked through by an hourly cron job, newest first, five per run by default. A run watches the clock and stops between images before PHP would cut it off, leaving the rest for a follow-up run a couple of minutes later.
+* Publishing a post queues any unprocessed images found in its content, including images inside gallery, cover and media-and-text blocks, plus the featured image. They are queued 30 seconds apart, so publishing a gallery does not ask a single cron run to describe every image in it.
 * WP-CLI can run the whole library on demand instead of waiting for cron.
 
 Settings > Media gains a status section showing whether AI is available and how many images have been processed so far. A read-only REST endpoint at `ai-media-search/v1/status` returns the same counts to anyone with the `upload_files` capability.
@@ -61,7 +61,7 @@ Whatever the provider charges for image analysis is billed to your account with 
 
 = Customizing =
 
-Batch size, the prompt, the language, retry limits, which MIME types are processed, the cron interval and the stored search text are all filterable, and actions fire when an image is processed or fails. The full list, with examples, is in the README on GitHub: https://github.com/adamsilverstein/wp-ai-media-search
+Batch size, the prompt, the language, retry limits, which MIME types are processed, the cron interval, how long a batch run may take, how far apart a post's images are queued and the stored search text are all filterable, and actions fire when an image is processed or fails. The full list, with examples, is in the README on GitHub: https://github.com/adamsilverstein/wp-ai-media-search
 
 == Installation ==
 
@@ -109,6 +109,8 @@ At the defaults, five images per hour. A library of a few hundred images will ta
 It is retried, with an hour of cooldown between attempts, up to three times. After that it is marked as skipped and left alone. Failure counts show up in the Settings > Media status section, and `wp ai-media-search regenerate` will reset an image and try again.
 
 A run that is cut short rather than failing outright - a PHP timeout, a fatal error, a restarted worker - leaves the image marked as processing. Anything sitting there for more than fifteen minutes is treated as abandoned and picked up again by the next batch.
+
+Batch runs try not to get that far. Each one measures itself against the time PHP allows a request, counting from the moment that request began rather than the moment the batch did, stops between images once most of that is gone, and queues a follow-up run for whatever it did not reach. Images left over that way are untouched, not failed, so they carry no retry count.
 
 = Can it describe video or audio? =
 

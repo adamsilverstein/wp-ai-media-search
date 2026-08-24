@@ -34,6 +34,31 @@ function ai_media_search_on_new_attachment( $post_id ) {
 }
 
 /**
+ * Get the spacing between the jobs queued together for one post.
+ *
+ * WP-Cron runs every event that is due in a single request, so scheduling a
+ * whole gallery for the same moment hands one request every AI call in the
+ * post, back to back, against one `max_execution_time`. Spreading the jobs out
+ * gives each one its own cron request instead.
+ *
+ * @return int Seconds between successive jobs. Never negative.
+ */
+function ai_media_search_get_queue_stagger() {
+	/**
+	 * Filters the spacing between the per-image jobs queued for one post.
+	 *
+	 * Raise this on hosts where AI requests are slow, so a post's images are
+	 * spread over more cron requests. Return `0` to queue them all for the same
+	 * moment, which is how the plugin behaved before the spacing was added.
+	 *
+	 * @param int $stagger Seconds between successive jobs. Default 30.
+	 */
+	$stagger = (int) apply_filters( 'ai_media_search_queue_stagger', 30 );
+
+	return max( 0, $stagger );
+}
+
+/**
  * When a post is published, queue any unprocessed images attached to it.
  *
  * Covers both the images found in the post content and the featured image,
@@ -63,6 +88,9 @@ function ai_media_search_on_publish( $new_status, $old_status, $post ) {
 		$attachment_ids = array_unique( $attachment_ids );
 	}
 
+	$stagger = ai_media_search_get_queue_stagger();
+	$queued  = 0;
+
 	foreach ( $attachment_ids as $attachment_id ) {
 		// Use the shared eligibility check so retry backoff and skipped state
 		// are respected — we never rewrite a failed/skipped item back to pending.
@@ -81,7 +109,10 @@ function ai_media_search_on_publish( $new_status, $old_status, $post ) {
 			update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'pending' );
 		}
 
-		wp_schedule_single_event( time() + 5, 'ai_media_search_process_single', array( $attachment_id ) );
+		// Each image goes further out than the one before it, so a gallery
+		// post spreads across cron requests rather than filling one.
+		wp_schedule_single_event( time() + 5 + ( $queued * $stagger ), 'ai_media_search_process_single', array( $attachment_id ) );
+		++$queued;
 	}
 }
 
