@@ -74,6 +74,7 @@ Returns processing counts. Requires `upload_files` capability.
 |--------|---------|-------------|
 | `ai_media_search_batch_size` | `5` | Images per cron batch (clamped 1–50). |
 | `ai_media_search_prompt` | *(built-in)* | AI prompt text. Receives `$prompt, $attachment_id`. |
+| `ai_media_search_pre_prompt_image` | `null` | Return a JSON string or `WP_Error` to skip the AI request entirely. Receives `$response, $prompt, $file_path, $mime_type, $attachment_id`. |
 | `ai_media_search_should_process` | `true` | Skip specific attachments. Receives `$should, $attachment_id`. |
 | `ai_media_search_max_retries` | `3` | Max retry attempts before marking as skipped. |
 | `ai_media_search_update_alt_text` | `false` | When true, writes AI description to empty alt text fields. |
@@ -132,17 +133,58 @@ add_filter( 'ai_media_search_cron_interval', function () {
 
 ## Development
 
-Coding standards and static analysis run on every push and pull request. To run them locally:
+Tests, coding standards and static analysis all run on every push and pull
+request. Everything the plugin needs for development comes from Composer:
 
 ```bash
 composer install
+```
+
+### Checks
+
+```bash
+composer test      # PHPUnit, against the WordPress test library
 composer lint      # PHPCS: WordPress Coding Standards + PHPCompatibilityWP (8.1+)
 composer lint:fix  # PHPCBF: fix what can be fixed automatically
 composer analyze   # PHPStan level 5, via szepeviktor/phpstan-wordpress
 ```
 
-Configuration lives in `phpcs.xml.dist` and `phpstan.neon.dist`. None of the dev
-tooling ships in the WordPress.org build.
+Configuration lives in `phpunit.xml.dist`, `phpcs.xml.dist` and
+`phpstan.neon.dist`. None of the dev tooling ships in the WordPress.org build.
+
+### Running tests
+
+The test suite runs against the WordPress PHPUnit library. Both that library and a
+copy of WordPress come from Composer, so there is no install script to run and no
+Subversion checkout to keep in sync.
+
+The tests need a MySQL or MariaDB database they can drop and recreate. Point the
+suite at one with environment variables, then run it:
+
+```bash
+export WP_TESTS_DB_NAME=wordpress_test
+export WP_TESTS_DB_USER=root
+export WP_TESTS_DB_PASSWORD=root
+export WP_TESTS_DB_HOST=127.0.0.1:3306
+
+composer test
+```
+
+| Variable | Default |
+|----------|---------|
+| `WP_TESTS_DB_NAME` | `wordpress_test` |
+| `WP_TESTS_DB_USER` | `root` |
+| `WP_TESTS_DB_PASSWORD` | `root` |
+| `WP_TESTS_DB_HOST` | `localhost` |
+| `WP_TESTS_ABSPATH` | the WordPress copy in `vendor/` |
+
+**The database is wiped on every run**, so give the suite one of its own.
+
+No test ever reaches an AI provider. `AI_Media_Search_TestCase` short-circuits
+`ai_media_search_pre_prompt_image` with a failing stub, so a test that forgets to
+supply a canned response gets a `WP_Error` rather than a live request.
+
+GitHub Actions runs the suite on PHP 8.1 through 8.4 for every pull request.
 
 ## Uninstall
 

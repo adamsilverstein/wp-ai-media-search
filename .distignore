@@ -3,6 +3,7 @@
 /.claude
 /.wordpress-org
 /node_modules
+/tests
 /vendor
 
 .distignore
@@ -18,3 +19,6 @@ composer.json
 composer.lock
 phpcs.xml.dist
 phpstan.neon.dist
+phpunit.xml
+phpunit.xml.dist
+.phpunit.result.cache
