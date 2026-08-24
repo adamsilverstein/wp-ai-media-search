@@ -34,7 +34,10 @@ function ai_media_search_on_new_attachment( $post_id ) {
 }
 
 /**
- * When a post is published, queue any unprocessed images found in its content.
+ * When a post is published, queue any unprocessed images attached to it.
+ *
+ * Covers both the images found in the post content and the featured image,
+ * which lives in post meta rather than the content.
  *
  * @param string  $new_status New post status.
  * @param string  $old_status Old post status.
@@ -46,6 +49,19 @@ function ai_media_search_on_publish( $new_status, $old_status, $post ) {
 	}
 
 	$attachment_ids = ai_media_search_extract_image_ids( $post->post_content );
+
+	// The featured image is stored in _thumbnail_id, so content parsing never
+	// sees it. Without this a post whose only image is the featured image
+	// queues nothing and waits for the hourly batch instead.
+	$thumbnail_id = (int) get_post_thumbnail_id( $post );
+
+	if ( $thumbnail_id ) {
+		$attachment_ids[] = $thumbnail_id;
+
+		// The featured image is often used in the content as well; queueing it
+		// twice would schedule the same job twice.
+		$attachment_ids = array_unique( $attachment_ids );
+	}
 
 	foreach ( $attachment_ids as $attachment_id ) {
 		// Use the shared eligibility check so retry backoff and skipped state
