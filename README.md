@@ -12,6 +12,12 @@ Upload an image of a cat, and later search your media library for "cat" — even
 4. The AI analyzes a scaled copy of each image (the `large` size by default, not the full size original) and generates a text description plus search tags.
 5. The description and tags are stored as post meta and included in media library search queries.
 
+A run that dies mid-flight - a PHP timeout, a fatal error, a restarted worker -
+leaves an image marked `processing`. Anything still in that state after
+`ai_media_search_processing_timeout` seconds (15 minutes by default) is treated
+as abandoned and picked up again by the next batch, so nothing needs `--reset`
+to get moving again.
+
 The plugin never overwrites user-entered metadata (title, caption, description, alt text). All AI data is stored in separate `_wp_ai_media_search_*` meta keys.
 
 ## Requirements
@@ -78,6 +84,7 @@ Returns processing counts. Requires `upload_files` capability.
 | `ai_media_search_image_size` | `'large'` | Registered image size sent to the AI. Use `'full'` to send the original. Receives `$size, $attachment_id`. |
 | `ai_media_search_should_process` | `true` | Skip specific attachments. Receives `$should, $attachment_id`. |
 | `ai_media_search_max_retries` | `3` | Max retry attempts before marking as skipped. |
+| `ai_media_search_processing_timeout` | `900` | Seconds an attachment may sit in `processing` before the run that owns it is presumed dead and the attachment is retried. Clamped to a minimum of 60. |
 | `ai_media_search_update_alt_text` | `false` | When true, writes AI description to empty alt text fields. |
 | `ai_media_search_metadata` | *(AI output)* | Filter metadata after AI generation, before storage. Receives `$metadata, $attachment_id`. |
 | `ai_media_search_search_text` | *(description + tags)* | Filter concatenated search text before storage. Receives `$search_text, $metadata, $attachment_id`. |
@@ -209,4 +216,4 @@ from `readme.txt`, but the two are kept in sync so the readme is not misleading.
 
 ## Uninstall
 
-Deactivating the plugin stops processing and search integration but preserves all generated metadata. Deleting the plugin removes all `_wp_ai_media_search_*` meta from the database.
+Deactivating the plugin stops processing and search integration but preserves all generated metadata. Deleting the plugin removes all `_wp_ai_media_search_*` meta and any leftover `ai_media_search_lock_*` options from the database.
