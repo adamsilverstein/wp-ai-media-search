@@ -45,12 +45,70 @@ function ai_media_search_is_supported_attachment( $attachment_id ) {
 }
 
 /**
+ * Get the number of seconds after which an in-flight run is presumed dead.
+ *
+ * A PHP timeout, a fatal error or a restarted worker can end a run between the
+ * `processing` status being written and the AI call returning. Nothing gets a
+ * chance to clean up in that case, so the plugin waits this long before it
+ * treats the run as abandoned and lets the attachment be picked up again.
+ *
+ * @return int Timeout in seconds. Never less than one minute.
+ */
+function ai_media_search_get_processing_timeout() {
+	/**
+	 * Filters how long an attachment may sit in `processing` before the run
+	 * that owns it is presumed dead and the attachment is reprocessed.
+	 *
+	 * Raise this on hosts where AI requests are slow; the value is clamped to a
+	 * minimum of one minute so an in-flight run is never reclaimed instantly.
+	 *
+	 * @param int $timeout Timeout in seconds. Default 15 minutes.
+	 */
+	$timeout = (int) apply_filters( 'ai_media_search_processing_timeout', 15 * MINUTE_IN_SECONDS );
+
+	return max( MINUTE_IN_SECONDS, $timeout );
+}
+
+/**
+ * Determine whether an attachment left in `processing` has been abandoned.
+ *
+ * Age comes from the start time recorded when the run began, falling back to
+ * the timestamp stored in the lock for rows stranded before start times were
+ * tracked. With neither available there is no way to tell a dead run from a
+ * live one, so the attachment is left alone rather than risking a duplicate
+ * AI call.
+ *
+ * @phpstan-impure
+ *
+ * @param int $attachment_id Attachment post ID.
+ * @return bool Whether the run that owns the attachment has timed out.
+ */
+function ai_media_search_is_stale_processing( $attachment_id ) {
+	if ( 'processing' !== get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) ) {
+		return false;
+	}
+
+	$started = (int) get_post_meta( $attachment_id, '_wp_ai_media_search_started', true );
+
+	if ( ! $started ) {
+		$started = (int) get_option( "ai_media_search_lock_{$attachment_id}", 0 );
+	}
+
+	if ( ! $started ) {
+		return false;
+	}
+
+	return $started < ( time() - ai_media_search_get_processing_timeout() );
+}
+
+/**
  * Determine whether an attachment is eligible for processing.
  *
  * Enforces the same rules for all callers:
  * - Must be an existing attachment with a supported MIME type
- * - Must not already be complete or currently processing
+ * - Must not already be complete
  * - Must not be skipped (permanent give-up)
+ * - If processing, the run that owns it must have timed out
  * - If failed, must be past the retry cooldown and under max retries
  *
  * Reads live post meta, so the answer can change between calls - callers
@@ -70,7 +128,12 @@ function ai_media_search_can_process_attachment( $attachment_id ) {
 
 	$status = get_post_meta( $attachment_id, '_wp_ai_media_search_status', true );
 
-	if ( in_array( $status, array( 'complete', 'processing', 'skipped' ), true ) ) {
+	if ( in_array( $status, array( 'complete', 'skipped' ), true ) ) {
+		return false;
+	}
+
+	// An in-flight run blocks a second one, unless it has been abandoned.
+	if ( 'processing' === $status && ! ai_media_search_is_stale_processing( $attachment_id ) ) {
 		return false;
 	}
 
@@ -106,27 +169,107 @@ function ai_media_search_can_process_attachment( $attachment_id ) {
  * worker will succeed in inserting the row. The option is non-autoloaded so it
  * does not bloat the options cache.
  *
+ * The lock stores the time it was taken and expires: a holder that dies without
+ * releasing it would otherwise wedge the attachment forever, so a lock older
+ * than the processing timeout is taken over.
+ *
+ * The returned value is the token the lock now holds. Pass it back to
+ * ai_media_search_release_lock() so a run whose lock was taken over cannot
+ * release the lock that replaced it.
+ *
  * @param int $attachment_id Attachment post ID.
- * @return bool True if the lock was acquired, false if already held.
+ * @return int|false The lock token, or false when another run holds the lock.
  */
 function ai_media_search_acquire_lock( $attachment_id ) {
+	global $wpdb;
+
 	$lock_key = "ai_media_search_lock_{$attachment_id}";
+	$token    = time();
 
 	// add_option returns false if the option already exists, making this atomic.
 	// Suppress errors from duplicate-key failures. Passing false for $autoload
 	// keeps the lock out of the autoloaded options; the 'no' string form is
 	// deprecated as of WordPress 6.7.
 	// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-	return @add_option( $lock_key, time(), '', false );
+	if ( @add_option( $lock_key, $token, '', false ) ) {
+		return $token;
+	}
+
+	$held_since = get_option( $lock_key );
+
+	// The holder released the lock in the moment between the failed insert and
+	// this read. Bowing out keeps the function to the single atomic insert
+	// above; the attachment comes round again on the next pass.
+	if ( false === $held_since ) {
+		return false;
+	}
+
+	// A lock inside the timeout belongs to a run that is still going.
+	if ( (int) $held_since > ( time() - ai_media_search_get_processing_timeout() ) ) {
+		return false;
+	}
+
+	// Take the expired lock over with a compare-and-swap. Reading the value and
+	// then writing it in two statements is not enough: two workers can both see
+	// the same expired lock, both replace it, and both start an AI call on the
+	// same attachment. Conditioning the write on the exact value read means the
+	// first writer wins and every other one matches zero rows.
+	//
+	// A stale cached read is safe here too - the WHERE clause simply matches
+	// nothing and the caller backs off.
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- The options API has no compare-and-swap, and only a conditional UPDATE makes the claim atomic. The option cache is cleared immediately below.
+	$claimed = $wpdb->update(
+		$wpdb->options,
+		array( 'option_value' => (string) $token ),
+		array(
+			'option_name'  => $lock_key,
+			'option_value' => maybe_serialize( $held_since ),
+		)
+	);
+
+	// The row was written behind get_option()'s back, so drop the cached copy
+	// the way the options API would have.
+	wp_cache_delete( $lock_key, 'options' );
+
+	return ( 1 === $claimed ) ? $token : false;
 }
 
 /**
  * Release a per-attachment lock.
  *
- * @param int $attachment_id Attachment post ID.
+ * Pass the token returned by ai_media_search_acquire_lock() to release only
+ * that lock. A run that overshoots the timeout can have its lock taken over
+ * while it is still going, and an unconditional delete would then remove the
+ * new holder's lock on the way out, letting a third run start alongside it.
+ * Conditioning the delete on the token means such a run can only ever remove
+ * the lock it actually took.
+ *
+ * @param int      $attachment_id Attachment post ID.
+ * @param int|null $token         Optional. Release only while the lock still
+ *                                holds this token. Default null, which drops
+ *                                the lock whoever holds it.
  */
-function ai_media_search_release_lock( $attachment_id ) {
-	delete_option( "ai_media_search_lock_{$attachment_id}" );
+function ai_media_search_release_lock( $attachment_id, $token = null ) {
+	global $wpdb;
+
+	$lock_key = "ai_media_search_lock_{$attachment_id}";
+
+	if ( null === $token ) {
+		delete_option( $lock_key );
+		return;
+	}
+
+	// Conditional delete, atomic for the same reason the takeover above is.
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- delete_option() cannot be made conditional on the current value. The option cache is cleared immediately below.
+	$wpdb->delete(
+		$wpdb->options,
+		array(
+			'option_name'  => $lock_key,
+			'option_value' => (string) $token,
+		)
+	);
+
+	wp_cache_delete( $lock_key, 'options' );
 }
 
 /**
@@ -144,24 +287,38 @@ function ai_media_search_process_single( $attachment_id ) {
 		return;
 	}
 
-	// Acquire atomic lock. If it's already held, another worker has it.
-	if ( ! ai_media_search_acquire_lock( $attachment_id ) ) {
+	// Acquire atomic lock. If a live run holds it, another worker has it. The
+	// token identifies this run's claim, so the lock is only released again if
+	// it is still the one this run took.
+	$lock_token = ai_media_search_acquire_lock( $attachment_id );
+
+	if ( false === $lock_token ) {
 		return;
 	}
 
 	// Re-check eligibility after acquiring the lock in case state changed.
-	if ( ! ai_media_search_can_process_attachment( $attachment_id ) ) {
-		ai_media_search_release_lock( $attachment_id );
+	//
+	// A row still marked `processing` here was abandoned: the check above only
+	// let it through because it had timed out, and holding the lock means no
+	// other worker is on it. It is deliberately not re-tested for staleness,
+	// because taking over the lock stamps it afresh.
+	$status = get_post_meta( $attachment_id, '_wp_ai_media_search_status', true );
+
+	if ( 'processing' !== $status && ! ai_media_search_can_process_attachment( $attachment_id ) ) {
+		ai_media_search_release_lock( $attachment_id, $lock_token );
 		return;
 	}
 
 	update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'processing' );
 
+	// Stamp the run so a later one can tell whether this one is still alive.
+	update_post_meta( $attachment_id, '_wp_ai_media_search_started', time() );
+
 	$metadata = ai_media_search_generate_metadata( $attachment_id );
 
 	if ( is_wp_error( $metadata ) ) {
 		ai_media_search_handle_failure( $attachment_id, $metadata );
-		ai_media_search_release_lock( $attachment_id );
+		ai_media_search_release_lock( $attachment_id, $lock_token );
 		return;
 	}
 
@@ -212,7 +369,8 @@ function ai_media_search_process_single( $attachment_id ) {
 	// Mark complete.
 	update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'complete' );
 	delete_post_meta( $attachment_id, '_wp_ai_media_search_error' );
-	ai_media_search_release_lock( $attachment_id );
+	delete_post_meta( $attachment_id, '_wp_ai_media_search_started' );
+	ai_media_search_release_lock( $attachment_id, $lock_token );
 
 	/**
 	 * Fires after an image has been successfully processed.
@@ -233,6 +391,7 @@ function ai_media_search_reset( $attachment_id ) {
 	delete_post_meta( $attachment_id, '_wp_ai_media_search_data' );
 	delete_post_meta( $attachment_id, '_wp_ai_media_search_text' );
 	delete_post_meta( $attachment_id, '_wp_ai_media_search_error' );
+	delete_post_meta( $attachment_id, '_wp_ai_media_search_started' );
 	ai_media_search_release_lock( $attachment_id );
 }
 
@@ -259,6 +418,9 @@ function ai_media_search_handle_failure( $attachment_id, $error ) {
 
 	update_post_meta( $attachment_id, '_wp_ai_media_search_error', $error_data );
 
+	// The run is over, so its start time no longer says anything.
+	delete_post_meta( $attachment_id, '_wp_ai_media_search_started' );
+
 	if ( $attempts >= $max_retries ) {
 		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'skipped' );
 	} else {
@@ -273,6 +435,53 @@ function ai_media_search_handle_failure( $attachment_id, $error ) {
 	 * @param array    $error_data    Error tracking data (code, message, attempts, last_tried).
 	 */
 	do_action( 'ai_media_search_failed', $attachment_id, $error, $error_data );
+}
+
+/**
+ * Build the meta query that selects attachments still waiting for processing.
+ *
+ * Covers attachments the plugin has never seen, those queued or failed, and
+ * those left in `processing` by a run that died before it could finish. A
+ * stranded row is recognised by a start time past the timeout, or by having no
+ * start time at all - which is how rows stranded before start times were
+ * tracked look. Eligibility is re-checked per attachment before any AI call, so
+ * a row that is merely in-flight is fetched and then passed over.
+ *
+ * @return array<int|string, mixed> Meta query for WP_Query.
+ */
+function ai_media_search_get_unprocessed_meta_query() {
+	return array(
+		'relation' => 'OR',
+		array(
+			'key'     => '_wp_ai_media_search_status',
+			'compare' => 'NOT EXISTS',
+		),
+		array(
+			'key'     => '_wp_ai_media_search_status',
+			'value'   => array( 'pending', 'failed' ),
+			'compare' => 'IN',
+		),
+		array(
+			'relation' => 'AND',
+			array(
+				'key'   => '_wp_ai_media_search_status',
+				'value' => 'processing',
+			),
+			array(
+				'relation' => 'OR',
+				array(
+					'key'     => '_wp_ai_media_search_started',
+					'compare' => 'NOT EXISTS',
+				),
+				array(
+					'key'     => '_wp_ai_media_search_started',
+					'value'   => time() - ai_media_search_get_processing_timeout(),
+					'compare' => '<',
+					'type'    => 'NUMERIC',
+				),
+			),
+		),
+	);
 }
 
 /**
@@ -296,21 +505,7 @@ function ai_media_search_batch_process() {
 			'post_status'    => 'inherit',
 			'post_mime_type' => ai_media_search_get_supported_mime_types(),
 			// phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- Finding unprocessed attachments requires a meta comparison; the result set is capped by the batch size.
-			'meta_query'     => array(
-				'relation' => 'OR',
-				array(
-					'key'     => '_wp_ai_media_search_status',
-					'compare' => 'NOT EXISTS',
-				),
-				array(
-					'key'   => '_wp_ai_media_search_status',
-					'value' => 'pending',
-				),
-				array(
-					'key'   => '_wp_ai_media_search_status',
-					'value' => 'failed',
-				),
-			),
+			'meta_query'     => ai_media_search_get_unprocessed_meta_query(),
 			'orderby'        => 'date',
 			'order'          => 'DESC',
 			'posts_per_page' => $batch_size,

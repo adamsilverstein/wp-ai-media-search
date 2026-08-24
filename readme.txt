@@ -102,6 +102,8 @@ At the defaults, five images per hour. A library of a few hundred images will ta
 
 It is retried, with an hour of cooldown between attempts, up to three times. After that it is marked as skipped and left alone. Failure counts show up in the Settings > Media status section, and `wp ai-media-search regenerate` will reset an image and try again.
 
+A run that is cut short rather than failing outright - a PHP timeout, a fatal error, a restarted worker - leaves the image marked as processing. Anything sitting there for more than fifteen minutes is treated as abandoned and picked up again by the next batch.
+
 = Can it describe video or audio? =
 
 Only if the configured provider supports it. Images are the only type processed out of the box, and other types are opt-in:
@@ -124,7 +126,7 @@ No. Only media library searches are extended, whether they come from the Media L
 
 = What happens if I deactivate or delete the plugin? =
 
-Deactivating stops the processing and the search integration but keeps everything already generated, so reactivating picks up where it left off. Deleting the plugin removes every `_wp_ai_media_search_*` meta row from the database.
+Deactivating stops the processing and the search integration but keeps everything already generated, so reactivating picks up where it left off. Deleting the plugin removes every `_wp_ai_media_search_*` meta row and any leftover `ai_media_search_lock_*` option from the database.
 
 == Changelog ==
 
