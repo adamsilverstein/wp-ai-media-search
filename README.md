@@ -10,7 +10,14 @@ Upload an image of a cat, and later search your media library for "cat" — even
 2. **Existing images** are processed in the background by an hourly cron job, newest first.
 3. **Published posts** trigger processing for any unprocessed images in their content.
 4. The AI analyzes a scaled copy of each image (the `large` size by default, not the full size original) and generates a text description plus search tags.
-5. The description and tags are stored as post meta and included in media library search queries.
+5. The description and tags are written in the site language, so a German site gets German text to search against.
+6. The description and tags are stored as post meta and included in media library search queries, both on the Media Library screen and in the block editor's media inserter.
+
+A run that dies mid-flight - a PHP timeout, a fatal error, a restarted worker -
+leaves an image marked `processing`. Anything still in that state after
+`ai_media_search_processing_timeout` seconds (15 minutes by default) is treated
+as abandoned and picked up again by the next batch, so nothing needs `--reset`
+to get moving again.
 
 The plugin never overwrites user-entered metadata (title, caption, description, alt text). All AI data is stored in separate `_wp_ai_media_search_*` meta keys.
 
@@ -104,15 +111,18 @@ long as the provider takes.
 |--------|---------|-------------|
 | `ai_media_search_batch_size` | `5` | Images per cron batch (clamped 1–50). |
 | `ai_media_search_prompt` | *(built-in)* | AI prompt text. Receives `$prompt, $attachment_id`. |
+| `ai_media_search_language` | *(from `get_locale()`)* | Language the description and tags are written in, as an English language name such as `French`. Receives `$language, $locale, $attachment_id`. |
 | `ai_media_search_pre_prompt_image` | `null` | Return a JSON string or `WP_Error` to skip the AI request entirely. Receives `$response, $prompt, $file_path, $mime_type, $attachment_id`. |
 | `ai_media_search_image_size` | `'large'` | Registered image size sent to the AI. Use `'full'` to send the original. Receives `$size, $attachment_id`. |
 | `ai_media_search_should_process` | `true` | Skip specific attachments. Receives `$should, $attachment_id`. |
 | `ai_media_search_max_retries` | `3` | Max retry attempts before marking as skipped. |
+| `ai_media_search_processing_timeout` | `900` | Seconds an attachment may sit in `processing` before the run that owns it is presumed dead and the attachment is retried. Clamped to a minimum of 60. |
 | `ai_media_search_update_alt_text` | `false` | When true, writes AI description to empty alt text fields. |
 | `ai_media_search_metadata` | *(AI output)* | Filter metadata after AI generation, before storage. Receives `$metadata, $attachment_id`. |
 | `ai_media_search_search_text` | *(description + tags)* | Filter concatenated search text before storage. Receives `$search_text, $metadata, $attachment_id`. |
 | `ai_media_search_supported_mime_types` | `['image']` | MIME type prefixes to process. Add `'video'` or `'audio'` to extend. |
 | `ai_media_search_cron_interval` | `'hourly'` | Cron recurrence schedule name for batch processing. |
+| `ai_media_search_is_attachment_search` | *(admin and REST media searches)* | Whether a query searches the AI text. Receives `$is_attachment_search, $query`. |
 | `ai_media_search_admin_script_screens` | `['post', 'upload', 'media', 'site-editor', 'widgets', 'customize']` | Admin screen bases (`WP_Screen::$base`) that load the Regenerate button script. |
 
 ### Examples
@@ -125,6 +135,11 @@ add_filter( 'ai_media_search_batch_size', function () {
 
 // Enable auto-populating empty alt text.
 add_filter( 'ai_media_search_update_alt_text', '__return_true' );
+
+// Generate metadata in one language regardless of the site language.
+add_filter( 'ai_media_search_language', function () {
+    return 'French';
+} );
 
 // Send a smaller image: cheaper and faster, with less detail for the AI to read.
 add_filter( 'ai_media_search_image_size', function () {
@@ -158,6 +173,14 @@ add_filter( 'ai_media_search_supported_mime_types', function ( $types ) {
 add_filter( 'ai_media_search_cron_interval', function () {
     return 'every_thirty_minutes'; // Must be registered with wp_get_schedules().
 } );
+
+// Search the AI text on the front end too, which is off by default.
+add_filter( 'ai_media_search_is_attachment_search', function ( $is_attachment_search, $query ) {
+    if ( ! is_admin() && $query->is_search() && 'attachment' === $query->get( 'post_type' ) ) {
+        return true;
+    }
+    return $is_attachment_search;
+}, 10, 2 );
 ```
 
 ## Actions
@@ -241,4 +264,4 @@ from `readme.txt`, but the two are kept in sync so the readme is not misleading.
 
 ## Uninstall
 
-Deactivating the plugin stops processing and search integration but preserves all generated metadata. Deleting the plugin removes all `_wp_ai_media_search_*` meta from the database.
+Deactivating the plugin stops processing and search integration but preserves all generated metadata. Deleting the plugin removes all `_wp_ai_media_search_*` meta and any leftover `ai_media_search_lock_*` options from the database.

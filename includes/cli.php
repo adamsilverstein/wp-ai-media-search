@@ -183,20 +183,7 @@ class AI_Media_Search_CLI {
 	 * @return int[] Attachment IDs.
 	 */
 	private function get_unprocessed_ids( $assoc_args, $reset ) {
-		$meta_query = $reset
-			? array()
-			: array(
-				'relation' => 'OR',
-				array(
-					'key'     => '_wp_ai_media_search_status',
-					'compare' => 'NOT EXISTS',
-				),
-				array(
-					'key'     => '_wp_ai_media_search_status',
-					'value'   => array( 'pending', 'failed' ),
-					'compare' => 'IN',
-				),
-			);
+		$meta_query = $reset ? array() : ai_media_search_get_unprocessed_meta_query();
 
 		$query_args = array(
 			'post_type'      => 'attachment',

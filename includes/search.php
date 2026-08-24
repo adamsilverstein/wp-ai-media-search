@@ -10,31 +10,79 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
- * Check if a WP_Query is an admin attachment search that we should modify.
+ * Query var used to mark the WP_Query behind a REST media search.
+ *
+ * `WP_REST_Posts_Controller::get_items()` passes the filtered arguments
+ * straight to WP_Query, so flagging them there is what tells the search
+ * filters below that this particular query is a media library search.
+ *
+ * @var string
+ */
+const AI_MEDIA_SEARCH_REST_QUERY_VAR = 'ai_media_search_rest';
+
+/**
+ * Mark a REST media query so the search filters recognize it.
+ *
+ * The block editor's media inserter searches `/wp/v2/media`, where `WP_ADMIN`
+ * is never defined and `is_admin()` is therefore false. `rest_attachment_query`
+ * fires only from the media controller, which makes it a narrower signal than
+ * the `REST_REQUEST` constant: it says the request is a media library listing
+ * rather than merely some REST request. It also covers an internal
+ * `rest_do_request()` call, where `REST_REQUEST` is not defined at all.
+ *
+ * The capability is checked here rather than in the search filters because
+ * `/wp/v2/media` answers unauthenticated visitors. AI metadata is private data
+ * about the library, so it only steers results for someone who can manage it.
+ *
+ * @param array           $args    Query arguments for WP_Query.
+ * @param WP_REST_Request $request The REST request.
+ * @return array Query arguments, flagged when the user can manage media.
+ */
+function ai_media_search_filter_rest_attachment_query( $args, $request ) {
+	unset( $request );
+
+	if ( ! current_user_can( 'upload_files' ) ) {
+		return $args;
+	}
+
+	$args[ AI_MEDIA_SEARCH_REST_QUERY_VAR ] = true;
+
+	return $args;
+}
+add_filter( 'rest_attachment_query', 'ai_media_search_filter_rest_attachment_query', 10, 2 );
+
+/**
+ * Check if a WP_Query is a media library search that we should modify.
+ *
+ * Two request contexts qualify: an admin request, which covers the media
+ * library list table and the classic modal over admin-ajax, and a REST media
+ * query flagged by `ai_media_search_filter_rest_attachment_query()`, which
+ * covers the block editor inserter. Front end queries are left alone.
  *
  * @param WP_Query $query The query to check.
  * @return bool
  */
 function ai_media_search_is_attachment_search( $query ) {
-	if ( ! is_admin() ) {
-		return false;
-	}
-
-	if ( ! $query->is_search() ) {
-		return false;
-	}
-
 	$post_type = $query->get( 'post_type' );
 
-	if ( 'attachment' === $post_type ) {
-		return true;
-	}
+	$is_attachment_query = 'attachment' === $post_type
+		|| ( is_array( $post_type ) && in_array( 'attachment', $post_type, true ) );
 
-	if ( is_array( $post_type ) && in_array( 'attachment', $post_type, true ) ) {
-		return true;
-	}
+	$is_media_library = is_admin() || $query->get( AI_MEDIA_SEARCH_REST_QUERY_VAR );
 
-	return false;
+	$is_attachment_search = $query->is_search() && $is_attachment_query && (bool) $is_media_library;
+
+	/**
+	 * Filters whether a query should search the AI metadata.
+	 *
+	 * Returning true opens the AI search text up to a query the plugin leaves
+	 * alone by default, such as a front end media search. Returning false turns
+	 * it off for a query it would otherwise handle.
+	 *
+	 * @param bool     $is_attachment_search Whether the query is a media library search.
+	 * @param WP_Query $query                The query being checked.
+	 */
+	return (bool) apply_filters( 'ai_media_search_is_attachment_search', $is_attachment_search, $query );
 }
 
 /**

@@ -18,6 +18,8 @@ AI Media Search hands each image to an AI model, asks for a short description an
 
 Nothing you typed is overwritten. Titles, captions, descriptions and alt text are left exactly as they are, and everything the AI generates lives in its own `_wp_ai_media_search_*` meta keys.
 
+The description and tags are written in your site language, so searching in the language you actually work in finds what you are looking for.
+
 = How images get processed =
 
 * New uploads are queued at upload time and picked up by a cron event a few seconds later.
@@ -33,7 +35,7 @@ Each image carries an AI Media Search panel with the generated description, the 
 
 Images that failed or were skipped print the error from the last attempt, and a Regenerate button next to it throws the stored data away and asks the AI again without leaving the page. The button is only there for users who can edit that attachment.
 
-Search integration applies to media library searches in the admin. Front end queries are left alone.
+Search integration applies to media library searches: the Media Library screen, the classic media modal, and the block editor's media inserter, which searches over the REST API. In every case the AI text is only consulted for a user who can manage media. Front end queries are left alone.
 
 = Important: your images are sent to an AI provider =
 
@@ -59,7 +61,7 @@ Whatever the provider charges for image analysis is billed to your account with 
 
 = Customizing =
 
-Batch size, the prompt, retry limits, which MIME types are processed, the cron interval and the stored search text are all filterable, and actions fire when an image is processed or fails. The full list, with examples, is in the README on GitHub: https://github.com/adamsilverstein/wp-ai-media-search
+Batch size, the prompt, the language, retry limits, which MIME types are processed, the cron interval and the stored search text are all filterable, and actions fire when an image is processed or fails. The full list, with examples, is in the README on GitHub: https://github.com/adamsilverstein/wp-ai-media-search
 
 == Installation ==
 
@@ -106,6 +108,8 @@ At the defaults, five images per hour. A library of a few hundred images will ta
 
 It is retried, with an hour of cooldown between attempts, up to three times. After that it is marked as skipped and left alone. Failure counts show up in the Settings > Media status section, and `wp ai-media-search regenerate` will reset an image and try again.
 
+A run that is cut short rather than failing outright - a PHP timeout, a fatal error, a restarted worker - leaves the image marked as processing. Anything sitting there for more than fifteen minutes is treated as abandoned and picked up again by the next batch.
+
 = Can it describe video or audio? =
 
 Only if the configured provider supports it. Images are the only type processed out of the box, and other types are opt-in:
@@ -120,13 +124,23 @@ On the image itself. Open it from the media library, or click it in the media mo
 
 Yes. The same panel has a Regenerate button, which clears the stored description and asks the AI for a new one on the spot. It is available to anyone who can edit that attachment, so authors can redo their own uploads without an administrator. `wp ai-media-search regenerate <id>` does the same thing from the command line.
 
+= What language are the descriptions written in? =
+
+Whatever Settings > General has the site language set to. The site language is used rather than the language of whoever is logged in, because the media library is shared: two editors with different admin languages would otherwise fill it with a mix of both.
+
+A site that wants one fixed language regardless - a multilingual site, or an English-language workflow on a non-English site - can say so:
+
+`add_filter( 'ai_media_search_language', function () { return 'French'; } );`
+
+Images processed before a site language change keep the text they were generated with. `wp ai-media-search process --all --reset` regenerates them.
+
 = Does it change front end search? =
 
-No. Only media library searches in the admin are extended.
+No. Only media library searches are extended, whether they come from the Media Library screen, the classic media modal or the block editor's media inserter. A visitor searching the front end, or a REST request from someone without the `upload_files` capability, gets the search WordPress would have run anyway.
 
 = What happens if I deactivate or delete the plugin? =
 
-Deactivating stops the processing and the search integration but keeps everything already generated, so reactivating picks up where it left off. Deleting the plugin removes every `_wp_ai_media_search_*` meta row from the database.
+Deactivating stops the processing and the search integration but keeps everything already generated, so reactivating picks up where it left off. Deleting the plugin removes every `_wp_ai_media_search_*` meta row and any leftover `ai_media_search_lock_*` option from the database.
 
 == Changelog ==
 
@@ -135,6 +149,7 @@ Deactivating stops the processing and the search integration but keeps everythin
 * Initial release.
 * AI-generated descriptions and search tags for media library images, via the WordPress AI Client API.
 * Automatic processing for new uploads, images in newly published posts, and an hourly background batch for the existing library.
+* Descriptions and tags generated in the site language, overridable with the `ai_media_search_language` filter.
 * Media library search extended to match the generated text.
 * WP-CLI commands: `process`, `status` and `regenerate`.
 * Status section on Settings > Media and a `ai-media-search/v1/status` REST endpoint.
