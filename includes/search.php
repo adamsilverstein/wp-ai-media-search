@@ -21,6 +21,16 @@ if ( ! defined( 'ABSPATH' ) ) {
 const AI_MEDIA_SEARCH_REST_QUERY_VAR = 'ai_media_search_rest';
 
 /**
+ * Table alias the AI search text is joined under.
+ *
+ * Naming it once keeps the JOIN, the condition that reads it and the check for
+ * a clause that already carries that condition from drifting apart.
+ *
+ * @var string
+ */
+const AI_MEDIA_SEARCH_META_ALIAS = 'ai_media_search_meta';
+
+/**
  * Mark a REST media query so the search filters recognize it.
  *
  * The block editor's media inserter searches `/wp/v2/media`, where `WP_ADMIN`
@@ -101,20 +111,77 @@ function ai_media_search_filter_posts_join( $join, $query ) {
 
 	global $wpdb;
 
-	$join .= " LEFT JOIN {$wpdb->postmeta} AS ai_media_search_meta"
-		. " ON ( {$wpdb->posts}.ID = ai_media_search_meta.post_id"
-		. " AND ai_media_search_meta.meta_key = '_wp_ai_media_search_text' )";
+	$alias = AI_MEDIA_SEARCH_META_ALIAS;
+
+	$join .= " LEFT JOIN {$wpdb->postmeta} AS {$alias}"
+		. " ON ( {$wpdb->posts}.ID = {$alias}.post_id"
+		. " AND {$alias}.meta_key = '_wp_ai_media_search_text' )";
 
 	return $join;
 }
 
 /**
+ * Work out which post columns core is searching for this query.
+ *
+ * `WP_Query::parse_search()` resolves the column list and then discards it: the
+ * result is never written back to the query vars, so the only way to know what
+ * core searched is to resolve it the same way. Doing that keeps the AI
+ * condition in step with a site that narrows the columns through
+ * `post_search_columns`.
+ *
+ * @param WP_Query $query The query object.
+ * @return string[] Column names, always a subset of the three columns core supports.
+ */
+function ai_media_search_get_search_columns( $query ) {
+	$default_columns = array( 'post_title', 'post_excerpt', 'post_content' );
+
+	$columns = $query->get( 'search_columns' );
+
+	if ( empty( $columns ) ) {
+		$columns = $default_columns;
+	}
+
+	if ( ! is_array( $columns ) ) {
+		$columns = array( $columns );
+	}
+
+	/*
+	 * This filter is documented in wp-includes/class-wp-query.php. It is a core
+	 * filter, so it is intentionally applied here without the plugin prefix.
+	 */
+	// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound
+	$columns = (array) apply_filters( 'post_search_columns', $columns, $query->get( 's' ), $query );
+
+	$columns = array_values( array_intersect( $columns, $default_columns ) );
+
+	if ( empty( $columns ) ) {
+		$columns = $default_columns;
+	}
+
+	return $columns;
+}
+
+/**
  * Add AI search meta to the search WHERE clause.
  *
- * For each search term, adds an OR condition matching against the AI-generated
- * search text. Mirrors the pattern in WP_Query::parse_search(). An excluded
- * term instead adds an AND condition ruling out images whose AI-generated text
- * contains it, leaving images that have no AI metadata in the results.
+ * The AI condition is composed from the query's own parsed search terms and
+ * then combined with whatever clause came in, rather than spliced into it by
+ * matching a rebuilt copy of core's SQL. Reconstructing that needle only worked
+ * for the exact SQL core happens to emit today: an `exact` query, a
+ * `post_search_columns` filter that drops a column, or another plugin rewriting
+ * the clause first all left nothing to match, and the AI text quietly stopped
+ * being searched.
+ *
+ * The incoming clause is a run of ` AND (…)` conjunctions, so it is wrapped
+ * whole and offered as one alternative to a condition built here from
+ * `search_terms`, which mirrors what core searches and adds the AI text to each
+ * term. Because that alternative is a superset of core's own condition, an
+ * untouched clause comes out with exactly the per-term OR semantics the string
+ * replacement used to produce, and a clause another plugin has rewritten keeps
+ * matching what it matched before.
+ *
+ * An excluded term is different: it has to narrow, so it is left out of the
+ * alternative and appended as its own top level condition instead.
  *
  * @param string   $search The search WHERE clause.
  * @param WP_Query $query  The query object.
@@ -125,20 +192,40 @@ function ai_media_search_filter_posts_search( $search, $query ) {
 		return $search;
 	}
 
-	global $wpdb;
+	$alias = AI_MEDIA_SEARCH_META_ALIAS;
+
+	// The clause already reads the AI text, so this is a second pass over a
+	// clause that has been handled. Wrapping it again would only nest the same
+	// condition inside itself.
+	if ( str_contains( $search, $alias . '.meta_value' ) ) {
+		return $search;
+	}
 
 	$search_terms = $query->get( 'search_terms' );
 
-	if ( empty( $search_terms ) ) {
+	if ( ! is_array( $search_terms ) || array() === $search_terms ) {
 		return $search;
 	}
+
+	global $wpdb;
+
+	$columns = ai_media_search_get_search_columns( $query );
+
+	// Core drops the wildcards for an `exact` query, matching the whole column.
+	$exact    = $query->get( 'exact' );
+	$wildcard = empty( $exact ) ? '%' : '';
 
 	// Detect exclusion prefix used by WP_Query::parse_search(). This is a core
 	// filter, so it is intentionally read here without the plugin prefix.
 	// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound
 	$exclusion_prefix = apply_filters( 'wp_query_search_exclusion_prefix', '-' );
 
+	$term_conditions = array();
+	$exclusions      = array();
+
 	foreach ( $search_terms as $term ) {
+		$term = (string) $term;
+
 		// Check if this is an excluded term (e.g., "-cat").
 		$exclude = $exclusion_prefix && str_starts_with( $term, $exclusion_prefix );
 
@@ -146,11 +233,18 @@ function ai_media_search_filter_posts_search( $search, $query ) {
 			$term = substr( $term, strlen( $exclusion_prefix ) );
 		}
 
-		$like = '%' . $wpdb->esc_like( $term ) . '%';
+		$like     = $wildcard . $wpdb->esc_like( $term ) . $wildcard;
+		$like_op  = $exclude ? 'NOT LIKE' : 'LIKE';
+		$andor_op = $exclude ? 'AND' : 'OR';
 
-		// Mirror the operator core uses for this term, so the clause core built
-		// can be found in the search string below.
-		$like_op = $exclude ? 'NOT LIKE' : 'LIKE';
+		$parts = array();
+
+		foreach ( $columns as $column ) {
+			// The column name comes from a fixed list and the operator from the
+			// two literals above. Only the value varies, through a placeholder.
+			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			$parts[] = $wpdb->prepare( "({$wpdb->posts}.{$column} {$like_op} %s)", $like );
+		}
 
 		if ( $exclude ) {
 			// The joined column cannot answer an exclusion. It is NULL for an
@@ -162,25 +256,35 @@ function ai_media_search_filter_posts_search( $search, $query ) {
 			// Asking whether any matching row exists avoids both.
 			// Only the LIKE value varies, and that goes through a placeholder.
 			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-			$meta_clause = $wpdb->prepare(
-				" AND NOT EXISTS ( SELECT 1 FROM {$wpdb->postmeta} AS ai_media_search_exclude"
+			$exclusions[] = $wpdb->prepare(
+				"AND NOT EXISTS ( SELECT 1 FROM {$wpdb->postmeta} AS ai_media_search_exclude"
 					. " WHERE ai_media_search_exclude.post_id = {$wpdb->posts}.ID"
 					. " AND ai_media_search_exclude.meta_key = '_wp_ai_media_search_text'"
 					. ' AND ai_media_search_exclude.meta_value LIKE %s )',
 				$like
 			);
 		} else {
-			$meta_clause = $wpdb->prepare( ' OR (ai_media_search_meta.meta_value LIKE %s)', $like );
+			// The alias is a constant and the value goes through a placeholder.
+			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			$parts[] = $wpdb->prepare( "({$alias}.meta_value LIKE %s)", $like );
 		}
 
-		$escaped_like = $wpdb->prepare( '%s', $like );
-		$needle       = "({$wpdb->posts}.post_content {$like_op} {$escaped_like})";
-		$replacement  = $needle . $meta_clause;
-
-		$search = str_replace( $needle, $replacement, $search );
+		$term_conditions[] = '(' . implode( " {$andor_op} ", $parts ) . ')';
 	}
 
-	return $search;
+	$ai_condition = implode( ' AND ', $term_conditions );
+
+	// Core appends this to its own clause for a logged out visitor. The
+	// alternative built here has to carry it as well, or the OR below would be
+	// a way around it.
+	if ( ! is_user_logged_in() ) {
+		$ai_condition .= " AND ({$wpdb->posts}.post_password = '')";
+	}
+
+	// `1=1` opens the group so the incoming clause, a run of ` AND (…)`
+	// conjunctions, reads correctly inside it. Nothing else is assumed about
+	// what it contains, which is what leaves another plugin's work intact.
+	return " AND ( ( 1=1 {$search} ) OR ( {$ai_condition} ) ) " . implode( ' ', $exclusions );
 }
 
 /**
