@@ -57,9 +57,9 @@ function ai_media_search_render_status_section() {
 				printf(
 					/* translators: 1: number of processed images, 2: total images, 3: percentage */
 					esc_html__( '%1$s of %2$s images processed (%3$s%%)', 'ai-media-search' ),
-					'<strong>' . number_format_i18n( $done ) . '</strong>',
-					number_format_i18n( $counts['total'] ),
-					$pct
+					'<strong>' . esc_html( number_format_i18n( $done ) ) . '</strong>',
+					esc_html( number_format_i18n( $counts['total'] ) ),
+					(int) $pct
 				);
 				?>
 
