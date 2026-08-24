@@ -29,6 +29,12 @@ The description and tags are written in your site language, so searching in the 
 
 Settings > Media gains a status section showing whether AI is available and how many images have been processed so far. A read-only REST endpoint at `ai-media-search/v1/status` returns the same counts to anyone with the `upload_files` capability.
 
+= Seeing and redoing what the AI wrote =
+
+Each image carries an AI Media Search panel with the generated description, the tags and the current status. It shows up as a sidebar box on the Edit Media screen and in the attachment details of the media modal, so the answer to "why did this image not come up in my search" is on screen rather than in the database.
+
+Images that failed or were skipped print the error from the last attempt, and a Regenerate button next to it throws the stored data away and asks the AI again without leaving the page. The button is only there for users who can edit that attachment.
+
 Search integration applies to media library searches: the Media Library screen, the classic media modal, and the block editor's media inserter, which searches over the REST API. In every case the AI text is only consulted for a user who can manage media. Front end queries are left alone.
 
 = Important: your images are sent to an AI provider =
@@ -110,6 +116,14 @@ Only if the configured provider supports it. Images are the only type processed 
 
 `add_filter( 'ai_media_search_supported_mime_types', function ( $types ) { $types[] = 'video'; return $types; } );`
 
+= Where can I see what the AI wrote about an image? =
+
+On the image itself. Open it from the media library, or click it in the media modal while editing a post, and the AI Media Search panel lists the description, the tags and the status. If the image failed or was skipped, the panel shows the error from the last attempt.
+
+= Can I make it try an image again? =
+
+Yes. The same panel has a Regenerate button, which clears the stored description and asks the AI for a new one on the spot. It is available to anyone who can edit that attachment, so authors can redo their own uploads without an administrator. `wp ai-media-search regenerate <id>` does the same thing from the command line.
+
 = What language are the descriptions written in? =
 
 Whatever Settings > General has the site language set to. The site language is used rather than the language of whoever is logged in, because the media library is shared: two editors with different admin languages would otherwise fill it with a mix of both.
@@ -139,6 +153,7 @@ Deactivating stops the processing and the search integration but keeps everythin
 * Media library search extended to match the generated text.
 * WP-CLI commands: `process`, `status` and `regenerate`.
 * Status section on Settings > Media and a `ai-media-search/v1/status` REST endpoint.
+* AI description panel on the Edit Media screen and in the media modal, with a Regenerate button for a single image.
 * Filters and actions for the prompt, batch size, retries, MIME types, cron interval and stored metadata.
 
 == Upgrade Notice ==

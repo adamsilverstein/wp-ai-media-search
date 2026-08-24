@@ -396,6 +396,37 @@ function ai_media_search_reset( $attachment_id ) {
 }
 
 /**
+ * Clear an attachment's AI metadata and process it again immediately.
+ *
+ * Regeneration is the one path where the stored state is deliberately thrown
+ * away: `ai_media_search_process_single()` refuses anything already complete or
+ * skipped, so the reset is what makes the attachment eligible again. The two
+ * steps live together here so every caller resets and reprocesses in the same
+ * order, and so a caller cannot leave an attachment wiped but unprocessed.
+ *
+ * @param int $attachment_id Attachment post ID.
+ */
+function ai_media_search_regenerate_attachment( $attachment_id ) {
+	ai_media_search_reset( $attachment_id );
+	ai_media_search_process_single( $attachment_id );
+
+	/**
+	 * Fires after an attachment has been regenerated on request.
+	 *
+	 * Unlike `ai_media_search_processed`, this fires whether the run succeeded
+	 * or failed, so it is the hook to use for auditing manual retries.
+	 *
+	 * @param int    $attachment_id Attachment post ID.
+	 * @param string $status        Resulting status meta value.
+	 */
+	do_action(
+		'ai_media_search_regenerated',
+		$attachment_id,
+		(string) get_post_meta( $attachment_id, '_wp_ai_media_search_status', true )
+	);
+}
+
+/**
  * Handle a processing failure with retry tracking.
  *
  * @param int      $attachment_id Attachment post ID.
