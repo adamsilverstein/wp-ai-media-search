@@ -22,7 +22,7 @@ Nothing you typed is overwritten. Titles, captions, descriptions and alt text ar
 
 * New uploads are queued at upload time and picked up by a cron event a few seconds later.
 * Images already in the library are worked through by an hourly cron job, newest first, five per run by default.
-* Publishing a post queues any unprocessed images found in its content, including images inside gallery, cover and media-and-text blocks.
+* Publishing a post queues any unprocessed images found in its content, including images inside gallery, cover and media-and-text blocks, plus the featured image.
 * WP-CLI can run the whole library on demand instead of waiting for cron.
 
 Settings > Media gains a status section showing whether AI is available and how many images have been processed so far. A read-only REST endpoint at `ai-media-search/v1/status` returns the same counts to anyone with the `upload_files` capability.
