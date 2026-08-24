@@ -144,6 +144,10 @@ No. Only media library searches are extended, whether they come from the Media L
 
 Deactivating stops the processing and the search integration but keeps everything already generated, so reactivating picks up where it left off. Deleting the plugin removes every `_wp_ai_media_search_*` meta row and any leftover `ai_media_search_lock_*` option from the database.
 
+== Screenshots ==
+
+1. The AI description, search tags and Regenerate button on the Edit Media screen.
+
 == Changelog ==
 
 = 0.1.0 =
