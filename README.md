@@ -11,7 +11,7 @@ Upload an image of a cat, and later search your media library for "cat" — even
 3. **Published posts** trigger processing for any unprocessed images in their content.
 4. The AI analyzes a scaled copy of each image (the `large` size by default, not the full size original) and generates a text description plus search tags.
 5. The description and tags are written in the site language, so a German site gets German text to search against.
-6. The description and tags are stored as post meta and included in media library search queries.
+6. The description and tags are stored as post meta and included in media library search queries, both on the Media Library screen and in the block editor's media inserter.
 
 The plugin never overwrites user-entered metadata (title, caption, description, alt text). All AI data is stored in separate `_wp_ai_media_search_*` meta keys.
 
@@ -85,6 +85,7 @@ Returns processing counts. Requires `upload_files` capability.
 | `ai_media_search_search_text` | *(description + tags)* | Filter concatenated search text before storage. Receives `$search_text, $metadata, $attachment_id`. |
 | `ai_media_search_supported_mime_types` | `['image']` | MIME type prefixes to process. Add `'video'` or `'audio'` to extend. |
 | `ai_media_search_cron_interval` | `'hourly'` | Cron recurrence schedule name for batch processing. |
+| `ai_media_search_is_attachment_search` | *(admin and REST media searches)* | Whether a query searches the AI text. Receives `$is_attachment_search, $query`. |
 
 ### Examples
 
@@ -134,6 +135,14 @@ add_filter( 'ai_media_search_supported_mime_types', function ( $types ) {
 add_filter( 'ai_media_search_cron_interval', function () {
     return 'every_thirty_minutes'; // Must be registered with wp_get_schedules().
 } );
+
+// Search the AI text on the front end too, which is off by default.
+add_filter( 'ai_media_search_is_attachment_search', function ( $is_attachment_search, $query ) {
+    if ( ! is_admin() && $query->is_search() && 'attachment' === $query->get( 'post_type' ) ) {
+        return true;
+    }
+    return $is_attachment_search;
+}, 10, 2 );
 ```
 
 ## Actions

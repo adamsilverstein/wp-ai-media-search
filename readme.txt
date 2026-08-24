@@ -29,7 +29,7 @@ The description and tags are written in your site language, so searching in the 
 
 Settings > Media gains a status section showing whether AI is available and how many images have been processed so far. A read-only REST endpoint at `ai-media-search/v1/status` returns the same counts to anyone with the `upload_files` capability.
 
-Search integration applies to media library searches in the admin. Front end queries are left alone.
+Search integration applies to media library searches: the Media Library screen, the classic media modal, and the block editor's media inserter, which searches over the REST API. In every case the AI text is only consulted for a user who can manage media. Front end queries are left alone.
 
 = Important: your images are sent to an AI provider =
 
@@ -120,7 +120,7 @@ Images processed before a site language change keep the text they were generated
 
 = Does it change front end search? =
 
-No. Only media library searches in the admin are extended.
+No. Only media library searches are extended, whether they come from the Media Library screen, the classic media modal or the block editor's media inserter. A visitor searching the front end, or a REST request from someone without the `upload_files` capability, gets the search WordPress would have run anyway.
 
 = What happens if I deactivate or delete the plugin? =
 
