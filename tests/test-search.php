@@ -53,6 +53,18 @@ class Test_AI_Media_Search_Search extends AI_Media_Search_TestCase {
 	}
 
 	/**
+	 * Sort a list of IDs so a comparison does not depend on result order.
+	 *
+	 * @param int[] $ids Attachment IDs.
+	 * @return int[] Sorted IDs.
+	 */
+	protected function sorted( $ids ) {
+		sort( $ids );
+
+		return $ids;
+	}
+
+	/**
 	 * The filters only run on admin attachment searches.
 	 *
 	 * @covers ::ai_media_search_is_attachment_search
@@ -317,15 +329,110 @@ class Test_AI_Media_Search_Search extends AI_Media_Search_TestCase {
 	}
 
 	/**
-	 * Excluding a term should not hide images that have no AI metadata.
+	 * Excluding a term must not hide images that have no AI metadata.
 	 *
-	 * Skipped: `NULL NOT LIKE '%cat%'` is NULL, so the LEFT JOIN drops every
-	 * unprocessed image. That is issue #6 and the fix belongs with it.
+	 * An unprocessed image is not a cat, so `-cat` has to return it.
 	 *
 	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/6
+	 *
+	 * @covers ::ai_media_search_filter_posts_search
 	 */
 	public function test_exclusion_prefix_keeps_unprocessed_images() {
-		$this->markTestSkipped( 'Exclusion terms drop unprocessed images. See issue #6.' );
+		$cat = $this->create_image_attachment( array( 'post_title' => 'IMG_0001' ) );
+		$this->set_search_text( $cat, 'A tabby cat asleep on a windowsill. cat, tabby' );
+
+		$dog = $this->create_image_attachment( array( 'post_title' => 'IMG_0002' ) );
+		$this->set_search_text( $dog, 'A dog running on a path. dog, running' );
+
+		$unprocessed = $this->create_image_attachment( array( 'post_title' => 'IMG_0003' ) );
+
+		$this->go_to_admin();
+
+		$this->assertSame(
+			$this->sorted( array( $dog, $unprocessed ) ),
+			$this->sorted( $this->search_media( '-cat' ) )
+		);
+	}
+
+	/**
+	 * A positive term and an excluded term in the same search.
+	 *
+	 * The unprocessed image matches the positive term on its title, and nothing
+	 * about it says "cat", so it belongs in the results.
+	 *
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/6
+	 *
+	 * @covers ::ai_media_search_filter_posts_search
+	 */
+	public function test_exclusion_prefix_combines_with_a_positive_term() {
+		$beach_cat = $this->create_image_attachment( array( 'post_title' => 'IMG_0001' ) );
+		$this->set_search_text( $beach_cat, 'A cat sitting on the beach. cat, beach' );
+
+		$beach_dog = $this->create_image_attachment( array( 'post_title' => 'IMG_0002' ) );
+		$this->set_search_text( $beach_dog, 'A dog splashing at the beach. dog, beach' );
+
+		$forest_dog = $this->create_image_attachment( array( 'post_title' => 'IMG_0003' ) );
+		$this->set_search_text( $forest_dog, 'A dog in a forest. dog, forest' );
+
+		$unprocessed = $this->create_image_attachment( array( 'post_title' => 'Beach at dawn' ) );
+
+		$this->go_to_admin();
+
+		$this->assertSame(
+			$this->sorted( array( $beach_dog, $unprocessed ) ),
+			$this->sorted( $this->search_media( 'beach -cat' ) )
+		);
+	}
+
+	/**
+	 * Several excluded terms in one search.
+	 *
+	 * Every exclusion has to hold, and none of them may cost the unprocessed
+	 * image its place in the results.
+	 *
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/6
+	 *
+	 * @covers ::ai_media_search_filter_posts_search
+	 */
+	public function test_multiple_exclusion_terms_all_apply() {
+		$cat = $this->create_image_attachment( array( 'post_title' => 'IMG_0001' ) );
+		$this->set_search_text( $cat, 'A tabby cat asleep on a windowsill. cat, tabby' );
+
+		$dog = $this->create_image_attachment( array( 'post_title' => 'IMG_0002' ) );
+		$this->set_search_text( $dog, 'A dog running on a path. dog, running' );
+
+		$bird = $this->create_image_attachment( array( 'post_title' => 'IMG_0003' ) );
+		$this->set_search_text( $bird, 'A bird on a fence post. bird, fence' );
+
+		$unprocessed = $this->create_image_attachment( array( 'post_title' => 'IMG_0004' ) );
+
+		$this->go_to_admin();
+
+		$this->assertSame(
+			$this->sorted( array( $bird, $unprocessed ) ),
+			$this->sorted( $this->search_media( '-cat -dog' ) )
+		);
+	}
+
+	/**
+	 * An excluded term is matched against every AI metadata row for the image.
+	 *
+	 * The joined column only carries one row at a time, so an image with a
+	 * second, non-matching row would otherwise slip past the exclusion.
+	 *
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/6
+	 *
+	 * @covers ::ai_media_search_filter_posts_search
+	 */
+	public function test_exclusion_applies_to_every_metadata_row() {
+		$attachment_id = $this->create_image_attachment( array( 'post_title' => 'IMG_0001' ) );
+
+		add_post_meta( $attachment_id, '_wp_ai_media_search_text', 'A tabby cat asleep.' );
+		add_post_meta( $attachment_id, '_wp_ai_media_search_text', 'A dog running on a path.' );
+
+		$this->go_to_admin();
+
+		$this->assertSame( array(), $this->search_media( '-cat' ) );
 	}
 
 	/**
