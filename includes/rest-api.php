@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
- * Register the REST API route for processing status.
+ * Register the plugin's REST API routes.
  */
 function ai_media_search_register_rest_routes() {
 	register_rest_route(
