@@ -12,12 +12,15 @@ jobs:
   trunk:
     name: Push to trunk
     runs-on: ubuntu-latest
+    permissions:
+      # Only needs to read the repository; deployment happens over SVN.
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Update assets and readme
-        uses: 10up/action-wordpress-plugin-asset-update@stable
+        uses: 10up/action-wordpress-plugin-asset-update@2480306f6f693672726d08b5917ea114cb2825f7 # v2.2.0
         env:
           SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
           SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}

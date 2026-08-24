@@ -17,7 +17,7 @@ jobs:
 
       - name: Deploy plugin
         id: deploy
-        uses: 10up/action-wordpress-plugin-deploy@stable
+        uses: 10up/action-wordpress-plugin-deploy@54bd289b8525fd23a5c365ec369185f2966529c2 # v2.3.0
         with:
           generate-zip: true
         env:
@@ -28,7 +28,7 @@ jobs:
           SLUG: ai-media-search
 
       - name: Attach zip file to the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.3.4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
