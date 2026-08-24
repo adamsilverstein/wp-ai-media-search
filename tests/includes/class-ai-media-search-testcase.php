@@ -34,6 +34,27 @@ abstract class AI_Media_Search_TestCase extends WP_UnitTestCase {
 	}
 
 	/**
+	 * Run the rest of the test as a site in another language.
+	 *
+	 * The `locale` filter is used rather than `switch_to_locale()`, which
+	 * refuses any locale with no translation files installed and so would
+	 * quietly leave most of these tests running in English. Filtering `locale`
+	 * is what `get_locale()` reads either way, and it works for the deliberately
+	 * unrecognized locales too. `WP_UnitTestCase` restores the hooks on tear
+	 * down, so the next test starts in English again.
+	 *
+	 * @param string $locale WordPress locale, such as `de_DE`.
+	 */
+	protected function switch_locale( $locale ) {
+		add_filter(
+			'locale',
+			static function () use ( $locale ) {
+				return $locale;
+			}
+		);
+	}
+
+	/**
 	 * Fail closed when a test has not stubbed the AI response.
 	 *
 	 * This runs at priority 1, so a stub added later still wins. Recording the

@@ -10,7 +10,8 @@ Upload an image of a cat, and later search your media library for "cat" — even
 2. **Existing images** are processed in the background by an hourly cron job, newest first.
 3. **Published posts** trigger processing for any unprocessed images in their content.
 4. The AI analyzes a scaled copy of each image (the `large` size by default, not the full size original) and generates a text description plus search tags.
-5. The description and tags are stored as post meta and included in media library search queries.
+5. The description and tags are written in the site language, so a German site gets German text to search against.
+6. The description and tags are stored as post meta and included in media library search queries.
 
 The plugin never overwrites user-entered metadata (title, caption, description, alt text). All AI data is stored in separate `_wp_ai_media_search_*` meta keys.
 
@@ -74,6 +75,7 @@ Returns processing counts. Requires `upload_files` capability.
 |--------|---------|-------------|
 | `ai_media_search_batch_size` | `5` | Images per cron batch (clamped 1–50). |
 | `ai_media_search_prompt` | *(built-in)* | AI prompt text. Receives `$prompt, $attachment_id`. |
+| `ai_media_search_language` | *(from `get_locale()`)* | Language the description and tags are written in, as an English language name such as `French`. Receives `$language, $locale, $attachment_id`. |
 | `ai_media_search_pre_prompt_image` | `null` | Return a JSON string or `WP_Error` to skip the AI request entirely. Receives `$response, $prompt, $file_path, $mime_type, $attachment_id`. |
 | `ai_media_search_image_size` | `'large'` | Registered image size sent to the AI. Use `'full'` to send the original. Receives `$size, $attachment_id`. |
 | `ai_media_search_should_process` | `true` | Skip specific attachments. Receives `$should, $attachment_id`. |
@@ -94,6 +96,11 @@ add_filter( 'ai_media_search_batch_size', function () {
 
 // Enable auto-populating empty alt text.
 add_filter( 'ai_media_search_update_alt_text', '__return_true' );
+
+// Generate metadata in one language regardless of the site language.
+add_filter( 'ai_media_search_language', function () {
+    return 'French';
+} );
 
 // Send a smaller image: cheaper and faster, with less detail for the AI to read.
 add_filter( 'ai_media_search_image_size', function () {

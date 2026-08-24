@@ -18,6 +18,8 @@ AI Media Search hands each image to an AI model, asks for a short description an
 
 Nothing you typed is overwritten. Titles, captions, descriptions and alt text are left exactly as they are, and everything the AI generates lives in its own `_wp_ai_media_search_*` meta keys.
 
+The description and tags are written in your site language, so searching in the language you actually work in finds what you are looking for.
+
 = How images get processed =
 
 * New uploads are queued at upload time and picked up by a cron event a few seconds later.
@@ -53,7 +55,7 @@ Whatever the provider charges for image analysis is billed to your account with 
 
 = Customizing =
 
-Batch size, the prompt, retry limits, which MIME types are processed, the cron interval and the stored search text are all filterable, and actions fire when an image is processed or fails. The full list, with examples, is in the README on GitHub: https://github.com/adamsilverstein/wp-ai-media-search
+Batch size, the prompt, the language, retry limits, which MIME types are processed, the cron interval and the stored search text are all filterable, and actions fire when an image is processed or fails. The full list, with examples, is in the README on GitHub: https://github.com/adamsilverstein/wp-ai-media-search
 
 == Installation ==
 
@@ -106,6 +108,16 @@ Only if the configured provider supports it. Images are the only type processed 
 
 `add_filter( 'ai_media_search_supported_mime_types', function ( $types ) { $types[] = 'video'; return $types; } );`
 
+= What language are the descriptions written in? =
+
+Whatever Settings > General has the site language set to. The site language is used rather than the language of whoever is logged in, because the media library is shared: two editors with different admin languages would otherwise fill it with a mix of both.
+
+A site that wants one fixed language regardless - a multilingual site, or an English-language workflow on a non-English site - can say so:
+
+`add_filter( 'ai_media_search_language', function () { return 'French'; } );`
+
+Images processed before a site language change keep the text they were generated with. `wp ai-media-search process --all --reset` regenerates them.
+
 = Does it change front end search? =
 
 No. Only media library searches in the admin are extended.
@@ -121,6 +133,7 @@ Deactivating stops the processing and the search integration but keeps everythin
 * Initial release.
 * AI-generated descriptions and search tags for media library images, via the WordPress AI Client API.
 * Automatic processing for new uploads, images in newly published posts, and an hourly background batch for the existing library.
+* Descriptions and tags generated in the site language, overridable with the `ai_media_search_language` filter.
 * Media library search extended to match the generated text.
 * WP-CLI commands: `process`, `status` and `regenerate`.
 * Status section on Settings > Media and a `ai-media-search/v1/status` REST endpoint.
