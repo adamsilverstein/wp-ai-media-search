@@ -530,11 +530,10 @@ function ai_media_search_get_unprocessed_meta_query() {
  * means PHP will not stop the script at all, which is the norm under WP-CLI and
  * on some hosts, so a few minutes is used instead of running indefinitely.
  *
- * The clock starts when the batch does. PHP measures its limit across the whole
- * request, so a cron request that has already spent time on other events has
- * less room left than this assumes - the reserved headroom absorbs the
- * difference, and a run that is killed anyway is recovered by the stale
- * processing timeout.
+ * The budget is spent from the start of the request, not the start of the
+ * batch, because that is how PHP counts. Booting WordPress and running any
+ * other cron events that were due on the same tick come out of it before the
+ * batch gets a look in - see ai_media_search_get_batch_clock_start().
  *
  * @return int Budget in seconds. Never negative. Zero means each run processes
  *             a single attachment, since a run always makes progress.
@@ -555,6 +554,9 @@ function ai_media_search_get_batch_time_budget() {
 	 * cron requests short. The budget is checked between items, so a run can
 	 * overrun it by however long the last AI call takes; leave room for that.
 	 *
+	 * The value covers the whole request, not just the batch: whatever the
+	 * request already spent before the batch started counts against it.
+	 *
 	 * A run always processes at least one attachment, so no value here can stop
 	 * the queue from draining.
 	 *
@@ -567,6 +569,40 @@ function ai_media_search_get_batch_time_budget() {
 	$budget = (int) apply_filters( 'ai_media_search_batch_time_budget', $budget, $max_execution_time );
 
 	return max( 0, $budget );
+}
+
+/**
+ * Get the moment a batch run's time budget is measured from.
+ *
+ * PHP counts `max_execution_time` from the start of the request, not from the
+ * start of the batch. A cron request runs every event that is due, so by the
+ * time the batch is reached WordPress has booted and any earlier callbacks have
+ * had their turn - and all of that has already come out of the same allowance.
+ * Measuring from the batch's own start would miss every second of it, and a run
+ * given a 24 second budget out of a 30 second limit would happily take all 24
+ * on top of the 10 the request had already spent.
+ *
+ * PHP records the request's start time in `REQUEST_TIME_FLOAT`, but it is not
+ * guaranteed to be there and not guaranteed to make sense: some SAPIs leave it
+ * out, and a value in the future would make the elapsed time negative and stop
+ * the run ever ending. Anything unusable falls back to now, which measures from
+ * the batch instead - no worse than not checking at all.
+ *
+ * @return float Unix timestamp with microseconds.
+ */
+function ai_media_search_get_batch_clock_start() {
+	$now = microtime( true );
+
+	$request_start = isset( $_SERVER['REQUEST_TIME_FLOAT'] ) ? (float) $_SERVER['REQUEST_TIME_FLOAT'] : 0.0;
+
+	// Zero covers both a missing value and anything PHP could not read as a
+	// number, and a start time in the future is a clock problem rather than a
+	// head start - it would make the elapsed time negative.
+	if ( $request_start <= 0.0 || $request_start > $now ) {
+		return $now;
+	}
+
+	return $request_start;
 }
 
 /**
@@ -634,7 +670,7 @@ function ai_media_search_batch_process() {
 	}
 
 	$budget    = ai_media_search_get_batch_time_budget();
-	$started   = microtime( true );
+	$started   = ai_media_search_get_batch_clock_start();
 	$processed = 0;
 
 	foreach ( $query->posts as $attachment_id ) {
@@ -644,8 +680,10 @@ function ai_media_search_batch_process() {
 		// Anything this run does not reach is simply left as it was found, so
 		// the next run picks it up from the same query.
 		//
-		// The first item always runs: a budget small enough to be spent before
-		// any work happens would otherwise leave the queue stuck forever.
+		// The first item always runs. The budget can be gone before the batch
+		// even starts - a request that spent it elsewhere, or a filter that
+		// returns nothing much - and a run that did no work at all would leave
+		// the queue stuck forever.
 		if ( $processed > 0 && ( microtime( true ) - $started ) >= $budget ) {
 			break;
 		}

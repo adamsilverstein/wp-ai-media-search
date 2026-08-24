@@ -1430,6 +1430,108 @@ class Test_AI_Media_Search_Processing extends AI_Media_Search_TestCase {
 	}
 
 	/**
+	 * The budget covers the whole request, not just the batch.
+	 *
+	 * PHP counts max_execution_time from the start of the request, so a cron
+	 * request that already spent its allowance booting WordPress and running
+	 * other due events has nothing left to give the batch.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 * @covers ::ai_media_search_get_batch_clock_start
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/12
+	 */
+	public function test_batch_budget_runs_from_the_start_of_the_request() {
+		$this->stub_ai_success();
+		add_filter( 'ai_media_search_batch_size', static fn () => 10 );
+		add_filter( 'ai_media_search_batch_time_budget', static fn () => 5 );
+
+		// The request has already used the whole five seconds before the batch
+		// is even entered, so only the one guaranteed item should run. Measured
+		// from the batch instead, all three would.
+		$_SERVER['REQUEST_TIME_FLOAT'] = microtime( true ) - 5;
+
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+
+		ai_media_search_batch_process();
+
+		$this->assertCount( 1, $this->ai_calls, 'Time the request already spent has to count against the budget.' );
+	}
+
+	/**
+	 * Time already spent shortens the run rather than ending it.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 * @covers ::ai_media_search_get_batch_clock_start
+	 */
+	public function test_a_partly_spent_request_still_gets_what_is_left() {
+		$this->stub_ai_success();
+		add_filter( 'ai_media_search_batch_size', static fn () => 10 );
+		add_filter( 'ai_media_search_batch_time_budget', static fn () => 5 );
+
+		// Two seconds of the five are gone, so there is still room to work.
+		$_SERVER['REQUEST_TIME_FLOAT'] = microtime( true ) - 2;
+
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+
+		ai_media_search_batch_process();
+
+		$this->assertCount( 3, $this->ai_calls );
+	}
+
+	/**
+	 * A request start time that cannot be trusted falls back to the batch clock.
+	 *
+	 * @dataProvider data_unusable_request_start_times
+	 * @covers ::ai_media_search_get_batch_clock_start
+	 *
+	 * @param string $kind How the recorded request start time is unusable.
+	 */
+	public function test_batch_falls_back_when_the_request_start_is_unusable( $kind ) {
+		$this->stub_ai_success();
+		add_filter( 'ai_media_search_batch_size', static fn () => 10 );
+		add_filter( 'ai_media_search_batch_time_budget', static fn () => 5 );
+
+		switch ( $kind ) {
+			case 'missing':
+				unset( $_SERVER['REQUEST_TIME_FLOAT'] );
+				break;
+
+			case 'not a number':
+				$_SERVER['REQUEST_TIME_FLOAT'] = 'nonsense';
+				break;
+
+			case 'in the future':
+				$_SERVER['REQUEST_TIME_FLOAT'] = microtime( true ) + HOUR_IN_SECONDS;
+				break;
+		}
+
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+
+		ai_media_search_batch_process();
+
+		$this->assertCount( 3, $this->ai_calls, 'An unusable request start time must not change what the batch does.' );
+	}
+
+	/**
+	 * Data provider of request start times that cannot be relied on.
+	 *
+	 * @return array[]
+	 */
+	public function data_unusable_request_start_times() {
+		return array(
+			'missing'       => array( 'missing' ),
+			'not a number'  => array( 'not a number' ),
+			'in the future' => array( 'in the future' ),
+		);
+	}
+
+	/**
 	 * A backlog keeps draining instead of waiting an hour for the next batch.
 	 *
 	 * @covers ::ai_media_search_batch_process

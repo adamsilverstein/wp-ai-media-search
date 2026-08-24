@@ -15,11 +15,16 @@ Upload an image of a cat, and later search your media library for "cat" — even
 
 Every AI call is a blocking request that can take several seconds, so neither
 path is allowed to hand one PHP request more work than it can finish. A batch
-run stops between images once it has spent its share of `max_execution_time`
-(`ai_media_search_batch_time_budget`), leaves the rest of the batch exactly as
-it found it, and queues a follow-up run so a backlog keeps draining. Publishing
-a post spaces its images 30 seconds apart (`ai_media_search_queue_stagger`)
-rather than making one cron request describe an entire gallery.
+run stops between images once the request has spent its share of
+`max_execution_time` (`ai_media_search_batch_time_budget`), leaves the rest of
+the batch exactly as it found it, and queues a follow-up run so a backlog keeps
+draining. The budget is counted from the start of the request, the way PHP
+counts its own limit, so booting WordPress and running any other cron events
+due on the same tick come out of it first.
+
+Publishing a post spaces its images 30 seconds apart
+(`ai_media_search_queue_stagger`) rather than making one cron request describe
+an entire gallery.
 
 A run that dies mid-flight - a PHP timeout, a fatal error, a restarted worker -
 leaves an image marked `processing`. Anything still in that state after
@@ -132,7 +137,7 @@ long as the provider takes.
 | Filter | Default | Description |
 |--------|---------|-------------|
 | `ai_media_search_batch_size` | `5` | Images per cron batch (clamped 1–50). |
-| `ai_media_search_batch_time_budget` | *(80% of `max_execution_time`, or `180`)* | Seconds a batch run may spend before it stops between images and leaves the rest for the next run. Receives `$budget, $max_execution_time`. A run always processes at least one image. |
+| `ai_media_search_batch_time_budget` | *(80% of `max_execution_time`, or `180`)* | Seconds the request may spend before the batch stops between images and leaves the rest for the next run. Measured from the start of the request, not the start of the batch. Receives `$budget, $max_execution_time`. A run always processes at least one image. |
 | `ai_media_search_batch_followup_delay` | `120` | Seconds before the extra batch run queued when a run stops early with work left over. Zero or less turns follow-up runs off. |
 | `ai_media_search_prompt` | *(built-in)* | AI prompt text. Receives `$prompt, $attachment_id`. |
 | `ai_media_search_language` | *(from `get_locale()`)* | Language the description and tags are written in, as an English language name such as `French`. Receives `$language, $locale, $attachment_id`. |

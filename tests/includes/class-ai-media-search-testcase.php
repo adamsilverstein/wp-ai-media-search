@@ -23,14 +23,43 @@ abstract class AI_Media_Search_TestCase extends WP_UnitTestCase {
 	protected $ai_calls = array();
 
 	/**
+	 * The request start time PHP recorded, put back on tear down.
+	 *
+	 * @var mixed
+	 */
+	private $request_time_float;
+
+	/**
 	 * Block any real AI request for the duration of the test.
+	 *
+	 * The batch time budget is measured from the start of the request, which
+	 * for the suite is whenever PHPUnit started. Each test is given a fresh
+	 * request start so it behaves like the single cron request it stands in
+	 * for, rather than inheriting however long the suite has been running.
 	 */
 	public function set_up() {
 		parent::set_up();
 
 		$this->ai_calls = array();
 
+		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized, WordPress.Security.ValidatedSanitizedInput.MissingUnslash -- Stashed verbatim so tear down can put back exactly what PHP recorded.
+		$this->request_time_float      = $_SERVER['REQUEST_TIME_FLOAT'] ?? null;
+		$_SERVER['REQUEST_TIME_FLOAT'] = microtime( true );
+
 		add_filter( 'ai_media_search_pre_prompt_image', array( $this, 'block_ai_request' ), 1, 5 );
+	}
+
+	/**
+	 * Put the real request start time back for anything outside the suite.
+	 */
+	public function tear_down() {
+		if ( null === $this->request_time_float ) {
+			unset( $_SERVER['REQUEST_TIME_FLOAT'] );
+		} else {
+			$_SERVER['REQUEST_TIME_FLOAT'] = $this->request_time_float;
+		}
+
+		parent::tear_down();
 	}
 
 	/**

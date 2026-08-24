@@ -110,7 +110,7 @@ It is retried, with an hour of cooldown between attempts, up to three times. Aft
 
 A run that is cut short rather than failing outright - a PHP timeout, a fatal error, a restarted worker - leaves the image marked as processing. Anything sitting there for more than fifteen minutes is treated as abandoned and picked up again by the next batch.
 
-Batch runs try not to get that far. Each one measures itself against the time PHP allows a request, stops between images once most of that is gone, and queues a follow-up run for whatever it did not reach. Images left over that way are untouched, not failed, so they carry no retry count.
+Batch runs try not to get that far. Each one measures itself against the time PHP allows a request, counting from the moment that request began rather than the moment the batch did, stops between images once most of that is gone, and queues a follow-up run for whatever it did not reach. Images left over that way are untouched, not failed, so they carry no retry count.
 
 = Can it describe video or audio? =
 
