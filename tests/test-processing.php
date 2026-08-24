@@ -1025,4 +1025,306 @@ class Test_AI_Media_Search_Processing extends AI_Media_Search_TestCase {
 		$this->assertSame( '', get_post_meta( $attachment_id, '_wp_ai_media_search_started', true ) );
 		$this->assertFalse( get_option( "ai_media_search_lock_{$attachment_id}" ) );
 	}
+
+	/**
+	 * A batch that runs out of time stops instead of being killed part way.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 * @covers ::ai_media_search_get_batch_time_budget
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/12
+	 */
+	public function test_batch_stops_when_the_time_budget_is_spent() {
+		$this->stub_ai_success();
+		add_filter( 'ai_media_search_batch_size', static fn () => 10 );
+
+		// Nothing at all fits inside a budget of zero seconds, so the run stops
+		// after the single item it always allows itself.
+		add_filter( 'ai_media_search_batch_time_budget', static fn () => 0 );
+
+		$ids = array(
+			$this->create_image_attachment(),
+			$this->create_image_attachment(),
+			$this->create_image_attachment(),
+		);
+
+		$batches = array();
+		add_action(
+			'ai_media_search_batch_complete',
+			static function ( $processed, $remaining ) use ( &$batches ) {
+				$batches[] = array( $processed, $remaining );
+			},
+			10,
+			2
+		);
+
+		ai_media_search_batch_process();
+
+		$this->assertCount( 1, $this->ai_calls, 'Only the first attachment should have reached the AI.' );
+		$this->assertSame( array( array( 1, 2 ) ), $batches, 'The run must report what it left behind.' );
+		$this->assertCount( 1, array_filter( $ids, static fn ( $id ) => 'complete' === get_post_meta( $id, '_wp_ai_media_search_status', true ) ) );
+	}
+
+	/**
+	 * Work a budget-limited run could not reach is left queued, not lost.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/12
+	 */
+	public function test_a_truncated_batch_leaves_the_rest_queued() {
+		$this->stub_ai_success();
+		add_filter( 'ai_media_search_batch_size', static fn () => 10 );
+		add_filter( 'ai_media_search_batch_time_budget', static fn () => 0 );
+
+		$ids = array(
+			$this->create_image_attachment(),
+			$this->create_image_attachment(),
+			$this->create_image_attachment(),
+		);
+
+		ai_media_search_batch_process();
+
+		$untouched = array_values(
+			array_filter( $ids, static fn ( $id ) => 'complete' !== get_post_meta( $id, '_wp_ai_media_search_status', true ) )
+		);
+
+		$this->assertCount( 2, $untouched );
+
+		foreach ( $untouched as $id ) {
+			$this->assertNotSame( 'processing', get_post_meta( $id, '_wp_ai_media_search_status', true ), 'An item the run never started must not read as in flight.' );
+			$this->assertSame( '', get_post_meta( $id, '_wp_ai_media_search_started', true ) );
+			$this->assertSame( '', get_post_meta( $id, '_wp_ai_media_search_error', true ), 'Running out of time is not a failure.' );
+			$this->assertFalse( get_option( "ai_media_search_lock_{$id}" ), 'An item the run never started must not hold a lock.' );
+			$this->assertTrue( ai_media_search_can_process_attachment( $id ) );
+		}
+
+		// The next run, with time to spare, finds them where this one left them.
+		remove_all_filters( 'ai_media_search_batch_time_budget' );
+
+		ai_media_search_batch_process();
+
+		foreach ( $ids as $id ) {
+			$this->assertSame( 'complete', get_post_meta( $id, '_wp_ai_media_search_status', true ) );
+		}
+	}
+
+	/**
+	 * With time to spare the whole batch still runs.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 */
+	public function test_batch_completes_in_full_when_there_is_time() {
+		$this->stub_ai_success();
+		add_filter( 'ai_media_search_batch_size', static fn () => 10 );
+		add_filter( 'ai_media_search_batch_time_budget', static fn () => HOUR_IN_SECONDS );
+
+		$ids = array(
+			$this->create_image_attachment(),
+			$this->create_image_attachment(),
+			$this->create_image_attachment(),
+			$this->create_image_attachment(),
+		);
+
+		$batches = array();
+		add_action(
+			'ai_media_search_batch_complete',
+			static function ( $processed, $remaining ) use ( &$batches ) {
+				$batches[] = array( $processed, $remaining );
+			},
+			10,
+			2
+		);
+
+		ai_media_search_batch_process();
+
+		foreach ( $ids as $id ) {
+			$this->assertSame( 'complete', get_post_meta( $id, '_wp_ai_media_search_status', true ) );
+		}
+
+		$this->assertSame( array( array( 4, 0 ) ), $batches );
+	}
+
+	/**
+	 * The budget is real elapsed time, not a count of items.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/12
+	 */
+	public function test_batch_stops_on_elapsed_time() {
+		add_filter( 'ai_media_search_batch_size', static fn () => 10 );
+		add_filter( 'ai_media_search_batch_time_budget', static fn () => 1 );
+
+		// Sleeping is the only way to move the clock the batch actually reads.
+		// Seven tenths of a second is the shortest interval that still puts two
+		// calls either side of a one second budget without being borderline.
+		add_filter(
+			'ai_media_search_pre_prompt_image',
+			static function () {
+				usleep( 700000 );
+
+				return wp_json_encode(
+					array(
+						'description' => 'A slow answer.',
+						'tags'        => 'slow',
+					)
+				);
+			}
+		);
+
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+
+		ai_media_search_batch_process();
+
+		$this->assertCount( 2, $this->ai_calls, 'Two slow calls spend a one second budget.' );
+	}
+
+	/**
+	 * Sites can size the budget to their own host.
+	 *
+	 * @covers ::ai_media_search_get_batch_time_budget
+	 */
+	public function test_batch_time_budget_is_filterable() {
+		add_filter( 'ai_media_search_batch_time_budget', static fn () => 12 );
+
+		$this->assertSame( 12, ai_media_search_get_batch_time_budget() );
+	}
+
+	/**
+	 * A nonsense budget is clamped rather than trusted.
+	 *
+	 * @covers ::ai_media_search_get_batch_time_budget
+	 */
+	public function test_batch_time_budget_is_never_negative() {
+		add_filter( 'ai_media_search_batch_time_budget', static fn () => -30 );
+
+		$this->assertSame( 0, ai_media_search_get_batch_time_budget() );
+	}
+
+	/**
+	 * The default budget stops short of PHP's own limit.
+	 *
+	 * @covers ::ai_media_search_get_batch_time_budget
+	 */
+	public function test_batch_time_budget_leaves_headroom_under_the_php_limit() {
+		$max_execution_time = (int) ini_get( 'max_execution_time' );
+		$budget             = ai_media_search_get_batch_time_budget();
+
+		if ( $max_execution_time > 0 ) {
+			$this->assertSame( (int) floor( $max_execution_time * 0.8 ), $budget );
+			$this->assertLessThan( $max_execution_time, $budget, 'The last AI call needs room to come back.' );
+		} else {
+			$this->assertSame( 3 * MINUTE_IN_SECONDS, $budget, 'An unlimited PHP timeout still needs a budget.' );
+		}
+	}
+
+	/**
+	 * The filter sees the limit the default was derived from.
+	 *
+	 * @covers ::ai_media_search_get_batch_time_budget
+	 */
+	public function test_batch_time_budget_filter_receives_the_php_limit() {
+		$seen = null;
+
+		add_filter(
+			'ai_media_search_batch_time_budget',
+			static function ( $budget, $max_execution_time ) use ( &$seen ) {
+				$seen = $max_execution_time;
+
+				return $budget;
+			},
+			10,
+			2
+		);
+
+		ai_media_search_get_batch_time_budget();
+
+		$this->assertSame( (int) ini_get( 'max_execution_time' ), $seen );
+	}
+
+	/**
+	 * A backlog keeps draining instead of waiting an hour for the next batch.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 * @covers ::ai_media_search_schedule_batch_followup
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/12
+	 */
+	public function test_a_truncated_batch_schedules_a_follow_up_run() {
+		$this->stub_ai_success();
+		add_filter( 'ai_media_search_batch_size', static fn () => 10 );
+		add_filter( 'ai_media_search_batch_time_budget', static fn () => 0 );
+
+		// The recurring event sits inside the window core uses to spot
+		// duplicates, so clear it to see the follow-up on its own.
+		wp_clear_scheduled_hook( 'ai_media_search_batch_process' );
+
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+
+		ai_media_search_batch_process();
+
+		$next = wp_next_scheduled( 'ai_media_search_batch_process' );
+
+		$this->assertNotFalse( $next, 'Leftover work must bring the batch back.' );
+		$this->assertEqualsWithDelta( time() + ( 2 * MINUTE_IN_SECONDS ), $next, 2 );
+	}
+
+	/**
+	 * A batch that got through everything has nothing to come back for.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 */
+	public function test_a_completed_batch_schedules_no_follow_up() {
+		$this->stub_ai_success();
+
+		wp_clear_scheduled_hook( 'ai_media_search_batch_process' );
+
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+
+		ai_media_search_batch_process();
+
+		$this->assertFalse( wp_next_scheduled( 'ai_media_search_batch_process' ) );
+	}
+
+	/**
+	 * Sites can pace the follow-up run, or turn it off entirely.
+	 *
+	 * @covers ::ai_media_search_schedule_batch_followup
+	 */
+	public function test_follow_up_delay_is_filterable() {
+		$this->stub_ai_success();
+		add_filter( 'ai_media_search_batch_time_budget', static fn () => 0 );
+		add_filter( 'ai_media_search_batch_followup_delay', static fn () => 45 );
+
+		wp_clear_scheduled_hook( 'ai_media_search_batch_process' );
+
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+
+		ai_media_search_batch_process();
+
+		$this->assertEqualsWithDelta( time() + 45, wp_next_scheduled( 'ai_media_search_batch_process' ), 2 );
+	}
+
+	/**
+	 * A delay of zero leaves the backlog to the next recurring run.
+	 *
+	 * @covers ::ai_media_search_schedule_batch_followup
+	 */
+	public function test_follow_up_can_be_turned_off() {
+		$this->stub_ai_success();
+		add_filter( 'ai_media_search_batch_time_budget', static fn () => 0 );
+		add_filter( 'ai_media_search_batch_followup_delay', static fn () => 0 );
+
+		wp_clear_scheduled_hook( 'ai_media_search_batch_process' );
+
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+
+		ai_media_search_batch_process();
+
+		$this->assertFalse( wp_next_scheduled( 'ai_media_search_batch_process' ) );
+	}
 }
