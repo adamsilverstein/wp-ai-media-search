@@ -171,45 +171,105 @@ function ai_media_search_can_process_attachment( $attachment_id ) {
  *
  * The lock stores the time it was taken and expires: a holder that dies without
  * releasing it would otherwise wedge the attachment forever, so a lock older
- * than the processing timeout is dropped and taken over.
+ * than the processing timeout is taken over.
+ *
+ * The returned value is the token the lock now holds. Pass it back to
+ * ai_media_search_release_lock() so a run whose lock was taken over cannot
+ * release the lock that replaced it.
  *
  * @param int $attachment_id Attachment post ID.
- * @return bool True if the lock was acquired, false if another run holds it.
+ * @return int|false The lock token, or false when another run holds the lock.
  */
 function ai_media_search_acquire_lock( $attachment_id ) {
+	global $wpdb;
+
 	$lock_key = "ai_media_search_lock_{$attachment_id}";
+	$token    = time();
 
 	// add_option returns false if the option already exists, making this atomic.
 	// Suppress errors from duplicate-key failures. Passing false for $autoload
 	// keeps the lock out of the autoloaded options; the 'no' string form is
 	// deprecated as of WordPress 6.7.
 	// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-	if ( @add_option( $lock_key, time(), '', false ) ) {
-		return true;
+	if ( @add_option( $lock_key, $token, '', false ) ) {
+		return $token;
 	}
 
-	$held_since = (int) get_option( $lock_key, 0 );
+	$held_since = get_option( $lock_key );
 
-	// A lock inside the timeout belongs to a run that is still going.
-	if ( $held_since > ( time() - ai_media_search_get_processing_timeout() ) ) {
+	// The holder released the lock in the moment between the failed insert and
+	// this read. Bowing out keeps the function to the single atomic insert
+	// above; the attachment comes round again on the next pass.
+	if ( false === $held_since ) {
 		return false;
 	}
 
-	// The holder is gone. Drop the abandoned lock and take a fresh one: the
-	// insert is still atomic, so only one of several racing workers wins.
-	delete_option( $lock_key );
+	// A lock inside the timeout belongs to a run that is still going.
+	if ( (int) $held_since > ( time() - ai_media_search_get_processing_timeout() ) ) {
+		return false;
+	}
 
-	// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-	return (bool) @add_option( $lock_key, time(), '', false );
+	// Take the expired lock over with a compare-and-swap. Reading the value and
+	// then writing it in two statements is not enough: two workers can both see
+	// the same expired lock, both replace it, and both start an AI call on the
+	// same attachment. Conditioning the write on the exact value read means the
+	// first writer wins and every other one matches zero rows.
+	//
+	// A stale cached read is safe here too - the WHERE clause simply matches
+	// nothing and the caller backs off.
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- The options API has no compare-and-swap, and only a conditional UPDATE makes the claim atomic. The option cache is cleared immediately below.
+	$claimed = $wpdb->update(
+		$wpdb->options,
+		array( 'option_value' => (string) $token ),
+		array(
+			'option_name'  => $lock_key,
+			'option_value' => maybe_serialize( $held_since ),
+		)
+	);
+
+	// The row was written behind get_option()'s back, so drop the cached copy
+	// the way the options API would have.
+	wp_cache_delete( $lock_key, 'options' );
+
+	return ( 1 === $claimed ) ? $token : false;
 }
 
 /**
  * Release a per-attachment lock.
  *
- * @param int $attachment_id Attachment post ID.
+ * Pass the token returned by ai_media_search_acquire_lock() to release only
+ * that lock. A run that overshoots the timeout can have its lock taken over
+ * while it is still going, and an unconditional delete would then remove the
+ * new holder's lock on the way out, letting a third run start alongside it.
+ * Conditioning the delete on the token means such a run can only ever remove
+ * the lock it actually took.
+ *
+ * @param int      $attachment_id Attachment post ID.
+ * @param int|null $token         Optional. Release only while the lock still
+ *                                holds this token. Default null, which drops
+ *                                the lock whoever holds it.
  */
-function ai_media_search_release_lock( $attachment_id ) {
-	delete_option( "ai_media_search_lock_{$attachment_id}" );
+function ai_media_search_release_lock( $attachment_id, $token = null ) {
+	global $wpdb;
+
+	$lock_key = "ai_media_search_lock_{$attachment_id}";
+
+	if ( null === $token ) {
+		delete_option( $lock_key );
+		return;
+	}
+
+	// Conditional delete, atomic for the same reason the takeover above is.
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- delete_option() cannot be made conditional on the current value. The option cache is cleared immediately below.
+	$wpdb->delete(
+		$wpdb->options,
+		array(
+			'option_name'  => $lock_key,
+			'option_value' => (string) $token,
+		)
+	);
+
+	wp_cache_delete( $lock_key, 'options' );
 }
 
 /**
@@ -227,8 +287,12 @@ function ai_media_search_process_single( $attachment_id ) {
 		return;
 	}
 
-	// Acquire atomic lock. If a live run holds it, another worker has it.
-	if ( ! ai_media_search_acquire_lock( $attachment_id ) ) {
+	// Acquire atomic lock. If a live run holds it, another worker has it. The
+	// token identifies this run's claim, so the lock is only released again if
+	// it is still the one this run took.
+	$lock_token = ai_media_search_acquire_lock( $attachment_id );
+
+	if ( false === $lock_token ) {
 		return;
 	}
 
@@ -241,7 +305,7 @@ function ai_media_search_process_single( $attachment_id ) {
 	$status = get_post_meta( $attachment_id, '_wp_ai_media_search_status', true );
 
 	if ( 'processing' !== $status && ! ai_media_search_can_process_attachment( $attachment_id ) ) {
-		ai_media_search_release_lock( $attachment_id );
+		ai_media_search_release_lock( $attachment_id, $lock_token );
 		return;
 	}
 
@@ -254,7 +318,7 @@ function ai_media_search_process_single( $attachment_id ) {
 
 	if ( is_wp_error( $metadata ) ) {
 		ai_media_search_handle_failure( $attachment_id, $metadata );
-		ai_media_search_release_lock( $attachment_id );
+		ai_media_search_release_lock( $attachment_id, $lock_token );
 		return;
 	}
 
@@ -306,7 +370,7 @@ function ai_media_search_process_single( $attachment_id ) {
 	update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'complete' );
 	delete_post_meta( $attachment_id, '_wp_ai_media_search_error' );
 	delete_post_meta( $attachment_id, '_wp_ai_media_search_started' );
-	ai_media_search_release_lock( $attachment_id );
+	ai_media_search_release_lock( $attachment_id, $lock_token );
 
 	/**
 	 * Fires after an image has been successfully processed.

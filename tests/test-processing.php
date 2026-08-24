@@ -197,12 +197,12 @@ class Test_AI_Media_Search_Processing extends AI_Media_Search_TestCase {
 	public function test_lock_is_exclusive() {
 		$attachment_id = $this->create_image_attachment();
 
-		$this->assertTrue( ai_media_search_acquire_lock( $attachment_id ) );
+		$this->assertNotFalse( ai_media_search_acquire_lock( $attachment_id ) );
 		$this->assertFalse( ai_media_search_acquire_lock( $attachment_id ), 'A second caller must not get the lock.' );
 
 		ai_media_search_release_lock( $attachment_id );
 
-		$this->assertTrue( ai_media_search_acquire_lock( $attachment_id ), 'The lock must be reusable once released.' );
+		$this->assertNotFalse( ai_media_search_acquire_lock( $attachment_id ), 'The lock must be reusable once released.' );
 	}
 
 	/**
@@ -214,8 +214,8 @@ class Test_AI_Media_Search_Processing extends AI_Media_Search_TestCase {
 		$first  = $this->create_image_attachment();
 		$second = $this->create_image_attachment();
 
-		$this->assertTrue( ai_media_search_acquire_lock( $first ) );
-		$this->assertTrue( ai_media_search_acquire_lock( $second ) );
+		$this->assertNotFalse( ai_media_search_acquire_lock( $first ) );
+		$this->assertNotFalse( ai_media_search_acquire_lock( $second ) );
 	}
 
 	/**
@@ -847,12 +847,12 @@ class Test_AI_Media_Search_Processing extends AI_Media_Search_TestCase {
 	public function test_a_stale_lock_can_be_broken() {
 		$attachment_id = $this->create_image_attachment();
 
-		$this->assertTrue( ai_media_search_acquire_lock( $attachment_id ) );
+		$this->assertNotFalse( ai_media_search_acquire_lock( $attachment_id ) );
 		$this->assertFalse( ai_media_search_acquire_lock( $attachment_id ), 'A live lock must hold.' );
 
 		update_option( "ai_media_search_lock_{$attachment_id}", time() - 7200 );
 
-		$this->assertTrue( ai_media_search_acquire_lock( $attachment_id ), 'An abandoned lock must be breakable.' );
+		$this->assertNotFalse( ai_media_search_acquire_lock( $attachment_id ), 'An abandoned lock must be breakable.' );
 		$this->assertGreaterThan( time() - 60, (int) get_option( "ai_media_search_lock_{$attachment_id}" ), 'Breaking the lock must stamp it afresh.' );
 		$this->assertFalse( ai_media_search_acquire_lock( $attachment_id ), 'The re-taken lock must hold in turn.' );
 	}
@@ -867,7 +867,80 @@ class Test_AI_Media_Search_Processing extends AI_Media_Search_TestCase {
 
 		add_option( "ai_media_search_lock_{$attachment_id}", '', '', false );
 
-		$this->assertTrue( ai_media_search_acquire_lock( $attachment_id ) );
+		$this->assertNotFalse( ai_media_search_acquire_lock( $attachment_id ) );
+	}
+
+	/**
+	 * Two workers finding the same expired lock must not both take it over.
+	 *
+	 * The interleaving is driven from the `query` filter: the second worker
+	 * runs its whole acquisition inside the first worker's write, which is the
+	 * window between reading the expired value and claiming it. Checking the
+	 * value and then writing it in two separate statements lets both workers
+	 * through and starts two AI calls on one attachment.
+	 *
+	 * @covers ::ai_media_search_acquire_lock
+	 */
+	public function test_two_workers_cannot_both_take_over_one_expired_lock() {
+		$attachment_id = $this->create_image_attachment();
+		$lock_key      = "ai_media_search_lock_{$attachment_id}";
+
+		add_option( $lock_key, time() - 7200, '', false );
+
+		$second = false;
+
+		$interleave = function ( $query ) use ( $lock_key, $attachment_id, &$second, &$interleave ) {
+			// Only interrupt the first write aimed at this lock. Reads still
+			// have to run untouched, or the worker never gets that far.
+			if ( false === strpos( $query, $lock_key ) || 1 === preg_match( '/^\s*SELECT/i', $query ) ) {
+				return $query;
+			}
+
+			remove_filter( 'query', $interleave );
+			$second = ai_media_search_acquire_lock( $attachment_id );
+
+			return $query;
+		};
+
+		add_filter( 'query', $interleave );
+
+		$first = ai_media_search_acquire_lock( $attachment_id );
+
+		remove_filter( 'query', $interleave );
+
+		$holders = array_filter( array( $first, $second ) );
+
+		$this->assertCount( 1, $holders, 'Exactly one worker may come away holding the lock.' );
+		$this->assertSame( (string) reset( $holders ), (string) get_option( $lock_key ), 'The stored lock must belong to the worker that was told it won.' );
+	}
+
+	/**
+	 * A run whose lock was taken over must not release the new holder's lock.
+	 *
+	 * @covers ::ai_media_search_release_lock
+	 */
+	public function test_releasing_a_lock_that_was_taken_over_is_a_no_op() {
+		$attachment_id = $this->create_image_attachment();
+		$lock_key      = "ai_media_search_lock_{$attachment_id}";
+
+		// The overrunning run holds this lock, and its token is the value it
+		// wrote when it took it.
+		$abandoned = time() - 7200;
+		add_option( $lock_key, $abandoned, '', false );
+
+		$taken_over = ai_media_search_acquire_lock( $attachment_id );
+
+		$this->assertNotFalse( $taken_over );
+
+		// The original run finally finishes and lets go of what it thinks is
+		// still its lock.
+		ai_media_search_release_lock( $attachment_id, $abandoned );
+
+		$this->assertSame( (string) $taken_over, (string) get_option( $lock_key ), 'A late release must leave the new holder alone.' );
+
+		ai_media_search_release_lock( $attachment_id, $taken_over );
+
+		$this->assertFalse( get_option( $lock_key ), 'The holder itself must still be able to release.' );
 	}
 
 	/**
