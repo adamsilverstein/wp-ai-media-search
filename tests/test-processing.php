@@ -1,0 +1,708 @@
+<?php
+/**
+ * Tests for includes/processing.php.
+ *
+ * @package AI_Media_Search
+ */
+
+/**
+ * Covers the eligibility rules, the lock, the retry state machine and the batch cron.
+ */
+class Test_AI_Media_Search_Processing extends AI_Media_Search_TestCase {
+
+	/**
+	 * Images are the only supported type out of the box.
+	 *
+	 * @covers ::ai_media_search_get_supported_mime_types
+	 */
+	public function test_supported_mime_types_default_to_images() {
+		$this->assertSame( array( 'image' ), ai_media_search_get_supported_mime_types() );
+	}
+
+	/**
+	 * The supported types filter widens what gets processed.
+	 *
+	 * @covers ::ai_media_search_is_supported_attachment
+	 */
+	public function test_supported_mime_types_can_be_extended() {
+		$attachment_id = self::factory()->attachment->create_object(
+			array(
+				'file'           => 'clip.mp4',
+				'post_mime_type' => 'video/mp4',
+			)
+		);
+
+		$this->assertFalse( ai_media_search_is_supported_attachment( $attachment_id ) );
+
+		add_filter(
+			'ai_media_search_supported_mime_types',
+			static function ( $types ) {
+				$types[] = 'video';
+				return $types;
+			}
+		);
+
+		$this->assertTrue( ai_media_search_is_supported_attachment( $attachment_id ) );
+	}
+
+	/**
+	 * Only supported MIME types are eligible.
+	 *
+	 * @covers ::ai_media_search_is_supported_attachment
+	 */
+	public function test_unsupported_mime_type_is_not_supported() {
+		$attachment_id = self::factory()->attachment->create_object(
+			array(
+				'file'           => 'doc.pdf',
+				'post_mime_type' => 'application/pdf',
+			)
+		);
+
+		$this->assertFalse( ai_media_search_is_supported_attachment( $attachment_id ) );
+	}
+
+	/**
+	 * A fresh image with no status is eligible.
+	 *
+	 * @covers ::ai_media_search_can_process_attachment
+	 */
+	public function test_unprocessed_image_can_be_processed() {
+		$attachment_id = $this->create_image_attachment();
+
+		$this->assertTrue( ai_media_search_can_process_attachment( $attachment_id ) );
+	}
+
+	/**
+	 * Non-attachments and missing posts are never eligible.
+	 *
+	 * @covers ::ai_media_search_can_process_attachment
+	 */
+	public function test_non_attachments_cannot_be_processed() {
+		$post_id = self::factory()->post->create();
+
+		$this->assertFalse( ai_media_search_can_process_attachment( $post_id ) );
+		$this->assertFalse( ai_media_search_can_process_attachment( 999999 ) );
+	}
+
+	/**
+	 * Terminal and in-flight statuses block a second run.
+	 *
+	 * @dataProvider data_blocking_statuses
+	 * @covers ::ai_media_search_can_process_attachment
+	 *
+	 * @param string $status Stored status value.
+	 */
+	public function test_blocking_statuses_prevent_processing( $status ) {
+		$attachment_id = $this->create_image_attachment();
+		update_post_meta( $attachment_id, '_wp_ai_media_search_status', $status );
+
+		$this->assertFalse( ai_media_search_can_process_attachment( $attachment_id ) );
+	}
+
+	/**
+	 * Data provider for statuses that block processing.
+	 *
+	 * @return array[]
+	 */
+	public function data_blocking_statuses() {
+		return array(
+			'complete'   => array( 'complete' ),
+			'processing' => array( 'processing' ),
+			'skipped'    => array( 'skipped' ),
+		);
+	}
+
+	/**
+	 * A pending item is still eligible: it is queued, not done.
+	 *
+	 * @covers ::ai_media_search_can_process_attachment
+	 */
+	public function test_pending_status_allows_processing() {
+		$attachment_id = $this->create_image_attachment();
+		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'pending' );
+
+		$this->assertTrue( ai_media_search_can_process_attachment( $attachment_id ) );
+	}
+
+	/**
+	 * A recent failure is held back by the one hour cooldown.
+	 *
+	 * @covers ::ai_media_search_can_process_attachment
+	 */
+	public function test_failure_cooldown_blocks_an_immediate_retry() {
+		$attachment_id = $this->create_image_attachment();
+		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'failed' );
+		update_post_meta(
+			$attachment_id,
+			'_wp_ai_media_search_error',
+			array(
+				'attempts'   => 1,
+				'last_tried' => time() - ( 5 * MINUTE_IN_SECONDS ),
+			)
+		);
+
+		$this->assertFalse( ai_media_search_can_process_attachment( $attachment_id ) );
+	}
+
+	/**
+	 * Once the cooldown has passed a failed item is retried.
+	 *
+	 * @covers ::ai_media_search_can_process_attachment
+	 */
+	public function test_failure_is_retried_after_the_cooldown() {
+		$attachment_id = $this->create_image_attachment();
+		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'failed' );
+		update_post_meta(
+			$attachment_id,
+			'_wp_ai_media_search_error',
+			array(
+				'attempts'   => 1,
+				'last_tried' => time() - ( 2 * HOUR_IN_SECONDS ),
+			)
+		);
+
+		$this->assertTrue( ai_media_search_can_process_attachment( $attachment_id ) );
+	}
+
+	/**
+	 * The attempt ceiling wins even when the cooldown has passed.
+	 *
+	 * @covers ::ai_media_search_can_process_attachment
+	 */
+	public function test_max_retries_stops_further_attempts() {
+		$attachment_id = $this->create_image_attachment();
+		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'failed' );
+		update_post_meta(
+			$attachment_id,
+			'_wp_ai_media_search_error',
+			array(
+				'attempts'   => 3,
+				'last_tried' => time() - ( 2 * HOUR_IN_SECONDS ),
+			)
+		);
+
+		$this->assertFalse( ai_media_search_can_process_attachment( $attachment_id ) );
+
+		add_filter( 'ai_media_search_max_retries', static fn () => 5 );
+
+		$this->assertTrue( ai_media_search_can_process_attachment( $attachment_id ) );
+	}
+
+	/**
+	 * Only one caller can hold an attachment lock at a time.
+	 *
+	 * @covers ::ai_media_search_acquire_lock
+	 * @covers ::ai_media_search_release_lock
+	 */
+	public function test_lock_is_exclusive() {
+		$attachment_id = $this->create_image_attachment();
+
+		$this->assertTrue( ai_media_search_acquire_lock( $attachment_id ) );
+		$this->assertFalse( ai_media_search_acquire_lock( $attachment_id ), 'A second caller must not get the lock.' );
+
+		ai_media_search_release_lock( $attachment_id );
+
+		$this->assertTrue( ai_media_search_acquire_lock( $attachment_id ), 'The lock must be reusable once released.' );
+	}
+
+	/**
+	 * Locks are per attachment, not global.
+	 *
+	 * @covers ::ai_media_search_acquire_lock
+	 */
+	public function test_locks_are_scoped_to_one_attachment() {
+		$first  = $this->create_image_attachment();
+		$second = $this->create_image_attachment();
+
+		$this->assertTrue( ai_media_search_acquire_lock( $first ) );
+		$this->assertTrue( ai_media_search_acquire_lock( $second ) );
+	}
+
+	/**
+	 * A successful run stores both meta shapes and marks the item complete.
+	 *
+	 * @covers ::ai_media_search_process_single
+	 */
+	public function test_successful_run_stores_metadata() {
+		$this->stub_ai_success( 'A tabby cat asleep on a windowsill.', 'cat, tabby, window' );
+
+		$attachment_id = $this->create_image_attachment();
+
+		$processed = array();
+		add_action(
+			'ai_media_search_processed',
+			static function ( $id, $metadata ) use ( &$processed ) {
+				$processed[] = array( $id, $metadata );
+			},
+			10,
+			2
+		);
+
+		ai_media_search_process_single( $attachment_id );
+
+		$this->assertSame( 'complete', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+
+		$data = get_post_meta( $attachment_id, '_wp_ai_media_search_data', true );
+		$this->assertIsArray( $data );
+		$this->assertSame( 'A tabby cat asleep on a windowsill.', $data['description'] );
+
+		$this->assertSame(
+			'A tabby cat asleep on a windowsill. cat, tabby, window',
+			get_post_meta( $attachment_id, '_wp_ai_media_search_text', true )
+		);
+
+		$this->assertCount( 1, $processed, 'ai_media_search_processed should fire once.' );
+		$this->assertSame( $attachment_id, $processed[0][0] );
+	}
+
+	/**
+	 * The lock is released so the attachment is not wedged after a success.
+	 *
+	 * @covers ::ai_media_search_process_single
+	 */
+	public function test_successful_run_releases_the_lock() {
+		$this->stub_ai_success();
+
+		$attachment_id = $this->create_image_attachment();
+		ai_media_search_process_single( $attachment_id );
+
+		$this->assertFalse( get_option( "ai_media_search_lock_{$attachment_id}" ) );
+	}
+
+	/**
+	 * A previous failure record is cleared once the item finally succeeds.
+	 *
+	 * @covers ::ai_media_search_process_single
+	 */
+	public function test_successful_run_clears_previous_error() {
+		$this->stub_ai_success();
+
+		$attachment_id = $this->create_image_attachment();
+		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'failed' );
+		update_post_meta(
+			$attachment_id,
+			'_wp_ai_media_search_error',
+			array(
+				'attempts'   => 1,
+				'last_tried' => time() - ( 2 * HOUR_IN_SECONDS ),
+			)
+		);
+
+		ai_media_search_process_single( $attachment_id );
+
+		$this->assertSame( 'complete', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+		$this->assertSame( '', get_post_meta( $attachment_id, '_wp_ai_media_search_error', true ) );
+	}
+
+	/**
+	 * The metadata filter runs before anything is stored.
+	 *
+	 * @covers ::ai_media_search_process_single
+	 */
+	public function test_metadata_filter_changes_what_is_stored() {
+		$this->stub_ai_success( 'Original description.', 'one, two' );
+
+		add_filter(
+			'ai_media_search_metadata',
+			static function ( $metadata ) {
+				$metadata['description'] = 'Replaced description.';
+				return $metadata;
+			}
+		);
+
+		$attachment_id = $this->create_image_attachment();
+		ai_media_search_process_single( $attachment_id );
+
+		$data = get_post_meta( $attachment_id, '_wp_ai_media_search_data', true );
+		$this->assertSame( 'Replaced description.', $data['description'] );
+		$this->assertStringStartsWith( 'Replaced description.', get_post_meta( $attachment_id, '_wp_ai_media_search_text', true ) );
+	}
+
+	/**
+	 * The search text filter can append extra keywords.
+	 *
+	 * @covers ::ai_media_search_process_single
+	 */
+	public function test_search_text_filter_changes_the_stored_text() {
+		$this->stub_ai_success( 'A cat.', 'cat' );
+
+		add_filter(
+			'ai_media_search_search_text',
+			static function ( $text ) {
+				return $text . ' extra-keyword';
+			}
+		);
+
+		$attachment_id = $this->create_image_attachment();
+		ai_media_search_process_single( $attachment_id );
+
+		$this->assertSame( 'A cat. cat extra-keyword', get_post_meta( $attachment_id, '_wp_ai_media_search_text', true ) );
+	}
+
+	/**
+	 * Alt text is left alone unless a site opts in.
+	 *
+	 * @covers ::ai_media_search_process_single
+	 */
+	public function test_alt_text_is_not_written_by_default() {
+		$this->stub_ai_success( 'A cat.', 'cat' );
+
+		$attachment_id = $this->create_image_attachment();
+		ai_media_search_process_single( $attachment_id );
+
+		$this->assertSame( '', get_post_meta( $attachment_id, '_wp_attachment_image_alt', true ) );
+	}
+
+	/**
+	 * With the filter on, empty alt text is filled from the description.
+	 *
+	 * @covers ::ai_media_search_process_single
+	 */
+	public function test_alt_text_is_written_when_enabled_and_empty() {
+		$this->stub_ai_success( 'A cat.', 'cat' );
+		add_filter( 'ai_media_search_update_alt_text', '__return_true' );
+
+		$attachment_id = $this->create_image_attachment();
+		ai_media_search_process_single( $attachment_id );
+
+		$this->assertSame( 'A cat.', get_post_meta( $attachment_id, '_wp_attachment_image_alt', true ) );
+	}
+
+	/**
+	 * Author written alt text is never overwritten.
+	 *
+	 * @covers ::ai_media_search_process_single
+	 */
+	public function test_existing_alt_text_is_preserved() {
+		$this->stub_ai_success( 'A cat.', 'cat' );
+		add_filter( 'ai_media_search_update_alt_text', '__return_true' );
+
+		$attachment_id = $this->create_image_attachment();
+		update_post_meta( $attachment_id, '_wp_attachment_image_alt', 'Hand written alt text' );
+
+		ai_media_search_process_single( $attachment_id );
+
+		$this->assertSame( 'Hand written alt text', get_post_meta( $attachment_id, '_wp_attachment_image_alt', true ) );
+	}
+
+	/**
+	 * An ineligible attachment never reaches the AI.
+	 *
+	 * @covers ::ai_media_search_process_single
+	 */
+	public function test_complete_attachment_is_not_reprocessed() {
+		$this->stub_ai_success();
+
+		$attachment_id = $this->create_image_attachment();
+		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'complete' );
+
+		ai_media_search_process_single( $attachment_id );
+
+		$this->assertSame( array(), $this->ai_calls );
+	}
+
+	/**
+	 * A held lock keeps a second worker out.
+	 *
+	 * @covers ::ai_media_search_process_single
+	 */
+	public function test_held_lock_prevents_a_duplicate_run() {
+		$this->stub_ai_success();
+
+		$attachment_id = $this->create_image_attachment();
+		ai_media_search_acquire_lock( $attachment_id );
+
+		ai_media_search_process_single( $attachment_id );
+
+		$this->assertSame( array(), $this->ai_calls, 'The AI must not be called while the lock is held.' );
+		$this->assertSame( '', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+	}
+
+	/**
+	 * A failed run records the error, marks the item failed and frees the lock.
+	 *
+	 * @covers ::ai_media_search_process_single
+	 */
+	public function test_failed_run_records_the_error_and_releases_the_lock() {
+		$this->stub_ai_response( new WP_Error( 'provider_down', 'Provider unavailable.' ) );
+
+		$attachment_id = $this->create_image_attachment();
+
+		$failures = array();
+		add_action(
+			'ai_media_search_failed',
+			static function ( $id, $error, $error_data ) use ( &$failures ) {
+				$failures[] = array( $id, $error, $error_data );
+			},
+			10,
+			3
+		);
+
+		ai_media_search_process_single( $attachment_id );
+
+		$this->assertSame( 'failed', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+
+		$error = get_post_meta( $attachment_id, '_wp_ai_media_search_error', true );
+		$this->assertIsArray( $error );
+		$this->assertSame( 'provider_down', $error['code'] );
+		$this->assertSame( 'Provider unavailable.', $error['message'] );
+		$this->assertSame( 1, $error['attempts'] );
+
+		$this->assertFalse( get_option( "ai_media_search_lock_{$attachment_id}" ) );
+		$this->assertCount( 1, $failures );
+	}
+
+	/**
+	 * Attempts accumulate across failures.
+	 *
+	 * @covers ::ai_media_search_handle_failure
+	 */
+	public function test_failures_increment_the_attempt_count() {
+		$attachment_id = $this->create_image_attachment();
+		$error         = new WP_Error( 'provider_down', 'Provider unavailable.' );
+
+		ai_media_search_handle_failure( $attachment_id, $error );
+		$this->assertSame( 1, get_post_meta( $attachment_id, '_wp_ai_media_search_error', true )['attempts'] );
+
+		ai_media_search_handle_failure( $attachment_id, $error );
+		$this->assertSame( 2, get_post_meta( $attachment_id, '_wp_ai_media_search_error', true )['attempts'] );
+		$this->assertSame( 'failed', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+	}
+
+	/**
+	 * The third failure gives up for good.
+	 *
+	 * @covers ::ai_media_search_handle_failure
+	 */
+	public function test_max_retries_transitions_failed_to_skipped() {
+		$attachment_id = $this->create_image_attachment();
+		$error         = new WP_Error( 'provider_down', 'Provider unavailable.' );
+
+		ai_media_search_handle_failure( $attachment_id, $error );
+		ai_media_search_handle_failure( $attachment_id, $error );
+
+		$this->assertSame( 'failed', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+
+		ai_media_search_handle_failure( $attachment_id, $error );
+
+		$this->assertSame( 'skipped', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+		$this->assertSame( 3, get_post_meta( $attachment_id, '_wp_ai_media_search_error', true )['attempts'] );
+		$this->assertFalse( ai_media_search_can_process_attachment( $attachment_id ) );
+	}
+
+	/**
+	 * The retry ceiling is filterable.
+	 *
+	 * @covers ::ai_media_search_handle_failure
+	 */
+	public function test_max_retries_filter_moves_the_give_up_point() {
+		add_filter( 'ai_media_search_max_retries', static fn () => 1 );
+
+		$attachment_id = $this->create_image_attachment();
+		ai_media_search_handle_failure( $attachment_id, new WP_Error( 'provider_down', 'Provider unavailable.' ) );
+
+		$this->assertSame( 'skipped', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+	}
+
+	/**
+	 * Reset clears every trace so the item is picked up again.
+	 *
+	 * @covers ::ai_media_search_reset
+	 */
+	public function test_reset_clears_all_state() {
+		$this->stub_ai_success();
+
+		$attachment_id = $this->create_image_attachment();
+		ai_media_search_process_single( $attachment_id );
+		ai_media_search_acquire_lock( $attachment_id );
+
+		ai_media_search_reset( $attachment_id );
+
+		$this->assertSame( '', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+		$this->assertSame( '', get_post_meta( $attachment_id, '_wp_ai_media_search_data', true ) );
+		$this->assertSame( '', get_post_meta( $attachment_id, '_wp_ai_media_search_text', true ) );
+		$this->assertSame( '', get_post_meta( $attachment_id, '_wp_ai_media_search_error', true ) );
+		$this->assertFalse( get_option( "ai_media_search_lock_{$attachment_id}" ) );
+		$this->assertTrue( ai_media_search_can_process_attachment( $attachment_id ) );
+	}
+
+	/**
+	 * A batch run picks up unprocessed images and reports how many it handled.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 */
+	public function test_batch_processes_unprocessed_images() {
+		$this->stub_ai_success();
+		add_filter( 'ai_media_search_batch_size', static fn () => 10 );
+
+		$ids = array(
+			$this->create_image_attachment(),
+			$this->create_image_attachment(),
+			$this->create_image_attachment(),
+		);
+
+		$batches = array();
+		add_action(
+			'ai_media_search_batch_complete',
+			static function ( $processed ) use ( &$batches ) {
+				$batches[] = $processed;
+			}
+		);
+
+		ai_media_search_batch_process();
+
+		foreach ( $ids as $id ) {
+			$this->assertSame( 'complete', get_post_meta( $id, '_wp_ai_media_search_status', true ) );
+		}
+
+		$this->assertSame( array( 3 ), $batches );
+	}
+
+	/**
+	 * The batch size caps how much work one cron run takes on.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 */
+	public function test_batch_size_is_respected() {
+		$this->stub_ai_success();
+		add_filter( 'ai_media_search_batch_size', static fn () => 2 );
+
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+
+		ai_media_search_batch_process();
+
+		$this->assertCount( 2, $this->ai_calls );
+	}
+
+	/**
+	 * Batch size is clamped rather than trusted.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 */
+	public function test_batch_size_is_clamped_to_at_least_one() {
+		$this->stub_ai_success();
+		add_filter( 'ai_media_search_batch_size', static fn () => 0 );
+
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+
+		ai_media_search_batch_process();
+
+		$this->assertCount( 1, $this->ai_calls );
+	}
+
+	/**
+	 * Completed images are not picked up again by the batch query.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 */
+	public function test_batch_skips_completed_images() {
+		$this->stub_ai_success();
+
+		$done = $this->create_image_attachment();
+		update_post_meta( $done, '_wp_ai_media_search_status', 'complete' );
+
+		ai_media_search_batch_process();
+
+		$this->assertSame( array(), $this->ai_calls );
+	}
+
+	/**
+	 * A failed image inside its cooldown is fetched but not retried.
+	 *
+	 * @covers ::ai_media_search_batch_process
+	 */
+	public function test_batch_honours_the_retry_cooldown() {
+		$this->stub_ai_success();
+
+		$attachment_id = $this->create_image_attachment();
+		update_post_meta( $attachment_id, '_wp_ai_media_search_status', 'failed' );
+		update_post_meta(
+			$attachment_id,
+			'_wp_ai_media_search_error',
+			array(
+				'attempts'   => 1,
+				'last_tried' => time(),
+			)
+		);
+
+		ai_media_search_batch_process();
+
+		$this->assertSame( array(), $this->ai_calls );
+		$this->assertSame( 'failed', get_post_meta( $attachment_id, '_wp_ai_media_search_status', true ) );
+	}
+
+	/**
+	 * Counts add up, and anything untracked lands in `unprocessed`.
+	 *
+	 * @covers ::ai_media_search_get_status_counts
+	 */
+	public function test_status_counts_add_up() {
+		$statuses = array( 'complete', 'complete', 'processing', 'pending', 'failed', 'skipped' );
+
+		foreach ( $statuses as $status ) {
+			update_post_meta( $this->create_image_attachment(), '_wp_ai_media_search_status', $status );
+		}
+
+		// Two images the plugin has never seen.
+		$this->create_image_attachment();
+		$this->create_image_attachment();
+
+		$counts = ai_media_search_get_status_counts();
+
+		$this->assertSame( 2, $counts['complete'] );
+		$this->assertSame( 1, $counts['processing'] );
+		$this->assertSame( 1, $counts['pending'] );
+		$this->assertSame( 1, $counts['failed'] );
+		$this->assertSame( 1, $counts['skipped'] );
+		$this->assertSame( 2, $counts['unprocessed'] );
+		$this->assertSame( 8, $counts['total'] );
+	}
+
+	/**
+	 * Only supported MIME types are counted.
+	 *
+	 * @covers ::ai_media_search_get_status_counts
+	 */
+	public function test_status_counts_ignore_unsupported_mime_types() {
+		$this->create_image_attachment();
+
+		self::factory()->attachment->create_object(
+			array(
+				'file'           => 'doc.pdf',
+				'post_mime_type' => 'application/pdf',
+			)
+		);
+
+		$counts = ai_media_search_get_status_counts();
+
+		$this->assertSame( 1, $counts['total'] );
+	}
+
+	/**
+	 * An empty library reports zeroes rather than tripping over the maths.
+	 *
+	 * @covers ::ai_media_search_get_status_counts
+	 */
+	public function test_status_counts_on_an_empty_library() {
+		$counts = ai_media_search_get_status_counts();
+
+		$this->assertSame( 0, $counts['total'] );
+		$this->assertSame( 0, $counts['unprocessed'] );
+		$this->assertSame( 0, $counts['complete'] );
+	}
+
+	/**
+	 * A run that dies mid-flight should not strand the attachment.
+	 *
+	 * Skipped: recovering a stale `processing` row is issue #8, and there is no
+	 * behaviour to assert until that lands.
+	 *
+	 * @link https://github.com/adamsilverstein/wp-ai-media-search/issues/8
+	 */
+	public function test_stale_processing_state_is_recovered() {
+		$this->markTestSkipped( 'Stale `processing` recovery is not implemented yet. See issue #8.' );
+	}
+}
